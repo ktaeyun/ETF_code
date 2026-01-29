@@ -15,6 +15,7 @@ from compare_gap.ou_simulator import create_ou_simulator
 from compare_gap.heston_sv_simulator import create_heston_sv_simulator
 from compare_gap.garch_simulator import create_garch_simulator
 from compare_gap.gap_metrics import calculate_statistical_tests
+from compare_gap.gap_visualizer import create_all_gap_visualizations
 
 
 def load_gap_data():
@@ -144,8 +145,8 @@ def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_model
                 
                 if model_name == 'OU':
                     # OU: 수준을 생성한 후 변화량으로 변환
-                    simulated_level = simulator.simulate_level(len(z_val), dt=1.0, seed=seed)
-                    simulated_changes = simulated_level.diff().dropna()
+                    # T개의 변화량을 얻기 위해 simulate_changes 사용
+                    simulated_changes = simulator.simulate_changes(len(z_val), dt=1.0, seed=seed)
                 else:
                     # Heston SV, GARCH: 변화량 직접 생성
                     simulated_changes = simulator.simulate_changes(len(z_val), seed=seed)
@@ -186,8 +187,52 @@ def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_model
                   f"n_violations={statistical_tests['es']['n_violations']}")
             print(f"    VALID: {statistical_tests['is_valid']}")
             
-            # 3. 결과 저장
-            print(f"\n[3단계] {model_name} 모델 결과 저장")
+            # 4. 시각화 (몬테카를로 시뮬레이션 모든 경로 사용)
+            print(f"\n[3단계] {model_name} 모델 시각화 (몬테카를로 시뮬레이션)")
+            print("-" * 60)
+            
+            # OU 모델의 경우 수준도 시각화
+            actual_level_val = None
+            simulated_level_val = None
+            monte_carlo_level_array = None
+            
+            if model_name == 'OU':
+                # OU: 수준 데이터 생성
+                # 검증 구간의 수준: y_val는 T+1개, z_val는 T개
+                # 수준 경로는 변화량보다 1개 많아야 함
+                actual_level_val = y_val.values  # 검증 구간의 수준 (전체)
+                
+                # 시뮬레이션된 수준 경로들 생성
+                all_simulated_level_list = []
+                for sim_idx in range(n_simulations):
+                    seed = 42 + sim_idx
+                    # T개의 변화량을 얻기 위해 T+1개의 수준 필요
+                    simulated_level = simulator.simulate_level(len(z_val) + 1, dt=1.0, seed=seed)
+                    all_simulated_level_list.append(simulated_level.values)
+                
+                monte_carlo_level_array = np.array(all_simulated_level_list)
+                simulated_level_val = np.median(monte_carlo_level_array, axis=0)
+                
+                # 길이 맞추기 (실제 수준과 동일하게)
+                if len(actual_level_val) != len(simulated_level_val):
+                    min_len = min(len(actual_level_val), len(simulated_level_val))
+                    actual_level_val = actual_level_val[:min_len]
+                    simulated_level_val = simulated_level_val[:min_len]
+                    if monte_carlo_level_array is not None:
+                        monte_carlo_level_array = monte_carlo_level_array[:, :min_len]
+            
+            create_all_gap_visualizations(
+                actual_changes=z_val.values,
+                simulated_changes=representative_changes,
+                actual_level=actual_level_val,
+                simulated_level=simulated_level_val,
+                output_dir=model_dir / 'plots',
+                monte_carlo_changes_paths=monte_carlo_changes_array,
+                monte_carlo_level_paths=monte_carlo_level_array
+            )
+            
+            # 5. 결과 저장
+            print(f"\n[4단계] {model_name} 모델 결과 저장")
             print("-" * 60)
             
             # 시뮬레이션 결과 CSV 저장 (대표 경로)
@@ -260,8 +305,8 @@ def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_model
             traceback.print_exc()
             continue
     
-    # 4. 전체 비교 결과 저장
-    print(f"\n[4단계] 전체 비교 결과 저장")
+    # 6. 전체 비교 결과 저장
+    print(f"\n[6단계] 전체 비교 결과 저장")
     print("-" * 60)
     
     def convert_to_serializable(obj):

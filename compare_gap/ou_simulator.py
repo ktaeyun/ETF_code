@@ -69,16 +69,26 @@ class OUSimulator:
         변화량 Δy_t 시뮬레이션
         
         Args:
-            T: 시뮬레이션 기간
+            T: 시뮬레이션 기간 (변화량 개수)
             dt: 시간 간격
             seed: 랜덤 시드
         
         Returns:
-            pd.Series: 시뮬레이션된 변화량 Δy_t
+            pd.Series: 시뮬레이션된 변화량 Δy_t (길이 T)
         """
-        y_level = self.simulate_level(T, dt, seed)
-        # Δy_t = y_t - y_{t-1}
+        # T개의 변화량을 얻기 위해 T+1개의 수준이 필요
+        y_level = self.simulate_level(T + 1, dt, seed)
+        # Δy_t = y_t - y_{t-1} (첫 번째 값은 drop되므로 T개 반환)
         changes = y_level.diff().dropna()
+        # 길이 확인 및 조정
+        if len(changes) < T:
+            # 부족한 경우 마지막 값으로 채움
+            last_change = changes.iloc[-1] if len(changes) > 0 else 0.0
+            while len(changes) < T:
+                changes = pd.concat([changes, pd.Series([last_change])], ignore_index=True)
+        elif len(changes) > T:
+            # 초과한 경우 앞부분만 사용
+            changes = changes.iloc[:T]
         return changes
 
 
