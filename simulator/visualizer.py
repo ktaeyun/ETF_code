@@ -12,26 +12,64 @@ from scipy import stats
 from statsmodels.tsa.stattools import acf
 
 
-def plot_nav_paths(actual_nav, simulated_nav, save_path=None):
+def plot_nav_paths(actual_nav, simulated_nav, save_path=None, monte_carlo_paths=None):
     """
-    NAV 경로 비교 시각화
+    NAV 경로 비교 시각화 (몬테카를로 시뮬레이션 지원)
     
     Args:
         actual_nav: 실제 NAV 시계열
-        simulated_nav: 시뮬레이션된 NAV 시계열
+        simulated_nav: 시뮬레이션된 NAV 시계열 (단일 경로 또는 대표 경로)
         save_path: 저장 경로 (None이면 표시만)
+        monte_carlo_paths: 몬테카를로 시뮬레이션 경로들 (n_paths x T 배열, 선택)
     """
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(14, 7))
     
     dates = range(len(actual_nav))
     
-    ax.plot(dates, actual_nav, label='실제 NAV', linewidth=1.5, alpha=0.8)
-    ax.plot(dates, simulated_nav, label='시뮬레이션 NAV', linewidth=1.5, alpha=0.8, linestyle='--')
+    # 실제 NAV
+    ax.plot(dates, actual_nav, label='실제 NAV', linewidth=2.5, alpha=0.9, color='black', zorder=10)
+    
+    # 몬테카를로 시뮬레이션 경로들
+    if monte_carlo_paths is not None and len(monte_carlo_paths) > 0:
+        # numpy 배열로 변환
+        if isinstance(monte_carlo_paths, list):
+            monte_carlo_paths = np.array(monte_carlo_paths)
+        n_paths = len(monte_carlo_paths)
+        
+        # 모든 경로를 반투명하게 그림
+        for i, path in enumerate(monte_carlo_paths):
+            ax.plot(dates, path, alpha=0.1, linewidth=0.5, color='blue', zorder=1)
+        
+        # 평균 경로
+        mean_path = np.mean(monte_carlo_paths, axis=0)
+        ax.plot(dates, mean_path, label=f'평균 경로 (n={n_paths})', 
+                linewidth=2, alpha=0.8, color='blue', linestyle='-', zorder=5)
+        
+        # 중앙값 경로
+        median_path = np.median(monte_carlo_paths, axis=0)
+        ax.plot(dates, median_path, label='중앙값 경로', 
+                linewidth=2, alpha=0.8, color='green', linestyle='--', zorder=5)
+        
+        # 5%, 95% 신뢰구간
+        p5_path = np.percentile(monte_carlo_paths, 5, axis=0)
+        p95_path = np.percentile(monte_carlo_paths, 95, axis=0)
+        ax.fill_between(dates, p5_path, p95_path, alpha=0.2, color='blue', 
+                        label='90% 신뢰구간', zorder=2)
+        
+        # 대표 경로 (단일 경로로 전달된 경우)
+        if simulated_nav is not None:
+            ax.plot(dates, simulated_nav, label='대표 경로', 
+                    linewidth=1.5, alpha=0.7, color='red', linestyle=':', zorder=6)
+    else:
+        # 단일 경로만 있는 경우
+        if simulated_nav is not None:
+            ax.plot(dates, simulated_nav, label='시뮬레이션 NAV', 
+                    linewidth=1.5, alpha=0.8, linestyle='--', color='blue')
     
     ax.set_xlabel('일수', fontsize=12)
     ax.set_ylabel('NAV', fontsize=12)
-    ax.set_title('NAV 경로 비교', fontsize=14, fontweight='bold')
-    ax.legend(fontsize=10)
+    ax.set_title('NAV 경로 비교 (몬테카를로 시뮬레이션)', fontsize=14, fontweight='bold')
+    ax.legend(fontsize=10, loc='best')
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -45,24 +83,46 @@ def plot_nav_paths(actual_nav, simulated_nav, save_path=None):
     plt.close()
 
 
-def plot_returns_distribution(actual_returns, simulated_returns, save_path=None):
+def plot_returns_distribution(actual_returns, simulated_returns, save_path=None, monte_carlo_returns=None):
     """
-    수익률 분포 비교 시각화 (히스토그램 + Q-Q plot)
+    수익률 분포 비교 시각화 (히스토그램 + Q-Q plot, 몬테카를로 시뮬레이션 지원)
     
     Args:
         actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률
+        simulated_returns: 시뮬레이션된 수익률 (단일 경로 또는 대표 경로)
         save_path: 저장 경로 (None이면 표시만)
+        monte_carlo_returns: 몬테카를로 시뮬레이션 수익률들 (n_paths x T 배열, 선택)
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
     actual_values = np.array(actual_returns)
-    sim_values = np.array(simulated_returns)
     
     # 히스토그램
     ax1 = axes[0]
-    ax1.hist(actual_values, bins=50, alpha=0.6, label='실제', density=True, color='blue')
-    ax1.hist(sim_values, bins=50, alpha=0.6, label='시뮬레이션', density=True, color='red')
+    ax1.hist(actual_values, bins=50, alpha=0.6, label='실제', density=True, color='black', edgecolor='black')
+    
+    # 몬테카를로 시뮬레이션 수익률들
+    if monte_carlo_returns is not None and len(monte_carlo_returns) > 0:
+        # numpy 배열로 변환
+        if isinstance(monte_carlo_returns, list):
+            monte_carlo_returns = np.array(monte_carlo_returns)
+        # 모든 시뮬레이션 수익률을 하나로 합침
+        all_sim_returns = monte_carlo_returns.flatten()
+        n_paths = len(monte_carlo_returns)
+        
+        ax1.hist(all_sim_returns, bins=50, alpha=0.5, label=f'시뮬레이션 (n={n_paths})', 
+                density=True, color='blue', edgecolor='blue', linewidth=0.5)
+        
+        # 평균 분포 (각 시점별 평균)
+        mean_returns = np.mean(monte_carlo_returns, axis=0)
+        ax1.hist(mean_returns, bins=50, alpha=0.7, label='평균 경로', 
+                density=True, color='green', edgecolor='green', linewidth=1.5, histtype='step')
+    else:
+        # 단일 경로만 있는 경우
+        if simulated_returns is not None:
+            sim_values = np.array(simulated_returns)
+            ax1.hist(sim_values, bins=50, alpha=0.6, label='시뮬레이션', density=True, color='red')
+    
     ax1.set_xlabel('수익률', fontsize=12)
     ax1.set_ylabel('밀도', fontsize=12)
     ax1.set_title('수익률 분포 비교', fontsize=12, fontweight='bold')
@@ -73,14 +133,23 @@ def plot_returns_distribution(actual_returns, simulated_returns, save_path=None)
     ax2 = axes[1]
     stats.probplot(actual_values, dist="norm", plot=ax2)
     ax2.get_lines()[0].set_label('실제')
-    ax2.get_lines()[0].set_color('blue')
-    ax2.get_lines()[0].set_alpha(0.6)
+    ax2.get_lines()[0].set_color('black')
+    ax2.get_lines()[0].set_alpha(0.8)
+    ax2.get_lines()[0].set_linewidth(2)
     
-    # 시뮬레이션 Q-Q plot 추가
-    stats.probplot(sim_values, dist="norm", plot=ax2)
-    ax2.get_lines()[2].set_label('시뮬레이션')
-    ax2.get_lines()[2].set_color('red')
-    ax2.get_lines()[2].set_alpha(0.6)
+    # 몬테카를로 시뮬레이션 Q-Q plot
+    if monte_carlo_returns is not None and len(monte_carlo_returns) > 0:
+        all_sim_returns = monte_carlo_returns.flatten()
+        stats.probplot(all_sim_returns, dist="norm", plot=ax2)
+        ax2.get_lines()[2].set_label(f'시뮬레이션 (n={n_paths})')
+        ax2.get_lines()[2].set_color('blue')
+        ax2.get_lines()[2].set_alpha(0.6)
+    elif simulated_returns is not None:
+        sim_values = np.array(simulated_returns)
+        stats.probplot(sim_values, dist="norm", plot=ax2)
+        ax2.get_lines()[2].set_label('시뮬레이션')
+        ax2.get_lines()[2].set_color('red')
+        ax2.get_lines()[2].set_alpha(0.6)
     
     ax2.set_title('Q-Q Plot (정규분포 기준)', fontsize=12, fontweight='bold')
     ax2.legend(fontsize=10)
@@ -297,18 +366,20 @@ def plot_tail_comparison(actual_returns, simulated_returns, quantiles=[0.95, 0.9
 
 def create_all_visualizations(actual_nav, simulated_nav, actual_returns, simulated_returns,
                               actual_jump_times=None, simulated_jump_times=None,
-                              output_dir=None):
+                              output_dir=None, monte_carlo_nav_paths=None, monte_carlo_returns_paths=None):
     """
-    모든 시각화 생성
+    모든 시각화 생성 (몬테카를로 시뮬레이션 지원)
     
     Args:
         actual_nav: 실제 NAV 시계열
-        simulated_nav: 시뮬레이션된 NAV 시계열
+        simulated_nav: 시뮬레이션된 NAV 시계열 (대표 경로)
         actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률
+        simulated_returns: 시뮬레이션된 수익률 (대표 경로)
         actual_jump_times: 실제 점프 시점 (선택)
         simulated_jump_times: 시뮬레이션된 점프 시점 (선택)
         output_dir: 출력 디렉토리 (None이면 표시만)
+        monte_carlo_nav_paths: 몬테카를로 시뮬레이션 NAV 경로들 (n_paths x T 배열, 선택)
+        monte_carlo_returns_paths: 몬테카를로 시뮬레이션 수익률 경로들 (n_paths x T 배열, 선택)
     """
     print(f"\n시각화 생성 중...")
     
@@ -321,23 +392,41 @@ def create_all_visualizations(actual_nav, simulated_nav, actual_returns, simulat
     
     # 1. NAV 경로 비교
     nav_path = output_path / 'nav_paths.png' if output_path else None
-    plot_nav_paths(actual_nav, simulated_nav, save_path=nav_path)
+    plot_nav_paths(actual_nav, simulated_nav, save_path=nav_path, 
+                   monte_carlo_paths=monte_carlo_nav_paths)
     
     # 2. 수익률 분포 비교
     returns_dist_path = output_path / 'returns_distribution.png' if output_path else None
-    plot_returns_distribution(actual_returns, simulated_returns, save_path=returns_dist_path)
+    plot_returns_distribution(actual_returns, simulated_returns, save_path=returns_dist_path,
+                             monte_carlo_returns=monte_carlo_returns_paths)
     
-    # 3. 변동성 군집 비교
+    # 3. 변동성 군집 비교 (몬테카를로 평균 사용)
     volatility_path = output_path / 'volatility_clustering.png' if output_path else None
-    plot_volatility_clustering(actual_returns, simulated_returns, save_path=volatility_path)
+    if monte_carlo_returns_paths is not None and len(monte_carlo_returns_paths) > 0:
+        # 몬테카를로 평균 수익률 사용
+        mean_sim_returns = np.mean(monte_carlo_returns_paths, axis=0)
+        plot_volatility_clustering(actual_returns, mean_sim_returns, save_path=volatility_path)
+    else:
+        plot_volatility_clustering(actual_returns, simulated_returns, save_path=volatility_path)
     
-    # 4. 수익률 시계열 비교
+    # 4. 수익률 시계열 비교 (몬테카를로 평균 사용)
     timeseries_path = output_path / 'returns_timeseries.png' if output_path else None
-    plot_returns_timeseries(actual_returns, simulated_returns, save_path=timeseries_path)
+    if monte_carlo_returns_paths is not None and len(monte_carlo_returns_paths) > 0:
+        mean_sim_returns = np.mean(monte_carlo_returns_paths, axis=0)
+        plot_returns_timeseries(actual_returns, mean_sim_returns, save_path=timeseries_path)
+    else:
+        plot_returns_timeseries(actual_returns, simulated_returns, save_path=timeseries_path)
     
-    # 5. 꼬리 분포 비교
+    # 5. 꼬리 분포 비교 (몬테카를로 모든 수익률 사용)
     tail_path = output_path / 'tail_comparison.png' if output_path else None
-    plot_tail_comparison(actual_returns, simulated_returns, save_path=tail_path)
+    if monte_carlo_returns_paths is not None and len(monte_carlo_returns_paths) > 0:
+        # numpy 배열로 변환 후 flatten
+        if isinstance(monte_carlo_returns_paths, list):
+            monte_carlo_returns_paths = np.array(monte_carlo_returns_paths)
+        all_sim_returns = monte_carlo_returns_paths.flatten()
+        plot_tail_comparison(actual_returns, all_sim_returns, save_path=tail_path)
+    else:
+        plot_tail_comparison(actual_returns, simulated_returns, save_path=tail_path)
     
     # 6. 점프 간격 분포 비교 (점프 데이터가 있는 경우)
     if actual_jump_times is not None and simulated_jump_times is not None:
