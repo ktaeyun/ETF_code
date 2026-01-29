@@ -51,7 +51,7 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
     results_dir.mkdir(parents=True, exist_ok=True)
     
     # 사용 가능한 모델 목록
-    available_models = ['GBM', 'Poisson-Gaussian', 'Merton-JD']
+    available_models = ['GBM','GARCH', 'Heston', 'Poisson-Gaussian', 'Merton-JD']
     
     # 모델 선택
     if selected_models is None:
