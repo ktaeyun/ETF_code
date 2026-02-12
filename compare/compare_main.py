@@ -1,6 +1,8 @@
 """
 시뮬레이터 비교 메인 실행 스크립트
 GBM, Heston, GARCH, Poisson-Gaussian 모델 비교
+
+파이프라인: 통계적 검정은 수익률 기준으로 수행. NAV 역변환은 괴리율 결합·시각화용.
 """
 
 import sys
@@ -12,19 +14,20 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from settings import settings
-from simulator.data_loader import load_nav_data
+from simulator.data_loader import load_nav_data, log_returns_to_nav
 from simulator.visualizer import create_all_visualizations
 from simulator.jump_detector import detect_jumps
 
 from compare.gbm_simulator import GBMSimulator, fit_gbm_parameters
 from compare.heston_simulator import HestonSimulator, fit_heston_parameters
 from compare.garch_simulator import GARCHSimulator, fit_garch_model
+from compare.arima_garch_simulator import ARIMAGARCHSimulator, fit_arima_garch
 from compare.poisson_gaussian_simulator import create_poisson_gaussian_simulator
 from compare.merton_jd_simulator import fit_merton_jd_model, MertonJDSimulator
 from compare.metrics import calculate_statistical_tests
 
 
-def run_model_comparison(n_simulations=1000, selected_models=None):
+def run_model_comparison(n_simulations=5000, selected_models=None):
     """
     모델 비교 실행 (몬테카를로 시뮬레이션)
     
@@ -51,7 +54,7 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
     results_dir.mkdir(parents=True, exist_ok=True)
     
     # 사용 가능한 모델 목록
-    available_models = ['GBM','GARCH', 'Heston', 'Poisson-Gaussian', 'Merton-JD']
+    available_models = ['Heston', 'ARIMA-GARCH']
     
     # 모델 선택
     if selected_models is None:
@@ -96,7 +99,20 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
                 fitted_model = fit_garch_model(returns_series, garch_p=1, garch_q=1, dist='t')
                 simulator_factory = lambda: GARCHSimulator(fitted_model)
                 has_jumps = False
-            
+
+            elif model_name == 'ARIMA-GARCH':
+                # ARIMA로 평균, GARCH로 변동성 모델링
+                arima_garch_simulator, arima_garch_params = fit_arima_garch(
+                    returns_series,
+                    ar_order=(1, 0, 1),
+                    garch_p=1,
+                    garch_q=1,
+                    dist='normal'
+                )
+                simulator_factory = lambda: arima_garch_simulator
+                has_jumps = False
+                model_params = arima_garch_params
+
             elif model_name == 'Poisson-Gaussian':
                 # jump_result는 한 번만 계산
                 jump_result_actual = detect_jumps(returns_series, quantile=0.95)
@@ -150,6 +166,7 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
                 actual_jump_times = None
             
             # 몬테카를로 시뮬레이션 실행
+            # 통계적 검정은 수익률 기준으로 진행. NAV 역변환은 괴리율 결합·시각화용.
             print(f"\n[2-1단계] {model_name} 몬테카를로 시뮬레이션 ({n_simulations}회)")
             print("-" * 60)
             
@@ -169,14 +186,15 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
                 else:
                     simulator = simulator_factory()
                 
-                # 시뮬레이션 실행 (seed를 다르게)
+                # 수익률 시뮬레이션 (검정은 수익률로 수행)
                 seed = 42 + sim_idx
                 simulated_returns = simulator.simulate_returns(T, seed=seed)
-                simulated_nav = simulator.simulate_nav_path(S0, T, seed=seed)
+                ret_values = simulated_returns.values if hasattr(simulated_returns, 'values') else np.asarray(simulated_returns).flatten()
+                # NAV 역변환: 괴리율 결합·시각화용
+                simulated_nav = log_returns_to_nav(S0, ret_values)
                 
-                # 시뮬레이션 경로 저장 (통계적 검정용)
-                all_simulated_returns_list.append(simulated_returns.values)
-                all_simulated_nav_list.append(simulated_nav.values)
+                all_simulated_returns_list.append(ret_values)   # 통계적 검정용
+                all_simulated_nav_list.append(simulated_nav)    # 괴리율 결합·시각화용
             
             print(f"  몬테카를로 시뮬레이션 완료: {n_simulations}회")
             
@@ -190,12 +208,11 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
             
             print(f"  대표 경로 생성: 시점별 중앙값")
             
-            # numpy 배열로 변환 (통계적 검정용)
             monte_carlo_nav_array = np.array(all_simulated_nav_list)
             monte_carlo_returns_array = np.array(all_simulated_returns_list)
             
-            # 통계적 검정 수행 (기존 검증 방식 제거)
-            print(f"\n[2-2단계] {model_name} 통계적 검정")
+            # 통계적 검정: 수익률 기준 (PIT-KS, VaR-Kupiec, ES)
+            print(f"\n[2-2단계] {model_name} 통계적 검정 (수익률 기준)")
             print("-" * 60)
             print("  통계적 검정 수행 중...")
             
@@ -211,10 +228,12 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
                   f"p-value={statistical_tests['kupiec']['pvalue']:.4f}, "
                   f"exceedance_rate={statistical_tests['kupiec']['exceedance_rate']:.4f} "
                   f"(expected={statistical_tests['kupiec']['expected_rate']:.4f})")
-            print(f"    ES: tail_error={statistical_tests['es']['tail_error']:.6f}, "
-                  f"mean_actual_es={statistical_tests['es']['mean_actual_es']:.6f}, "
-                  f"mean_sim_es={statistical_tests['es']['mean_sim_es']:.6f}, "
-                  f"n_violations={statistical_tests['es']['n_violations']}")
+            es = statistical_tests['es']
+            tail_err = f"{es['tail_error']:.6f}" if es['tail_error'] is not None else "N/A"
+            mean_act = f"{es['mean_actual_es']:.6f}" if es['mean_actual_es'] is not None else "N/A"
+            mean_sim = f"{es['mean_sim_es']:.6f}" if es['mean_sim_es'] is not None else "N/A"
+            print(f"    ES: tail_error={tail_err}, mean_actual_es={mean_act}, "
+                  f"mean_sim_es={mean_sim}, n_violations={es['n_violations']}")
             print(f"    VALID: {statistical_tests['is_valid']}")
             
             # 3. 검증 결과 저장 (통계적 검정만)
@@ -267,7 +286,7 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
             sim_results_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
             print(f"  - {csv_path}")
             
-            # 파라미터 저장 (Merton-JD 등)
+            # 파라미터 저장 (Merton-JD, ARIMA-GARCH 등)
             if model_name == 'Merton-JD':
                 params_path = model_dir / 'estimated_parameters.json'
                 params_to_save = {
@@ -283,9 +302,24 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
                 with open(params_path, 'w', encoding='utf-8') as f:
                     json.dump(params_to_save, f, ensure_ascii=False, indent=2)
                 print(f"  - {params_path}")
+            elif model_name == 'ARIMA-GARCH':
+                params_path = model_dir / 'estimated_parameters.json'
+                params_to_save = {}
+                for k, v in model_params.items():
+                    if isinstance(v, (int, float, np.floating, np.integer)):
+                        params_to_save[k] = float(v)
+                    elif isinstance(v, tuple):
+                        params_to_save[k] = list(v)
+                    else:
+                        params_to_save[k] = v
+                with open(params_path, 'w', encoding='utf-8') as f:
+                    json.dump(params_to_save, f, ensure_ascii=False, indent=2)
+                print(f"  - {params_path}")
             
             # 검증 결과 JSON 저장
             def convert_to_serializable(obj):
+                if obj is None:
+                    return None
                 if isinstance(obj, np.ndarray):
                     return obj.tolist()
                 elif isinstance(obj, (np.integer, np.floating, np.float64, np.float32, np.int64, np.int32)):
@@ -333,6 +367,8 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
     
     # numpy 타입을 JSON 직렬화 가능하게 변환
     def convert_to_serializable(obj):
+        if obj is None:
+            return None
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         elif isinstance(obj, (np.integer, np.floating, np.float64, np.float32, np.int64, np.int32)):
@@ -385,10 +421,12 @@ def run_model_comparison(n_simulations=1000, selected_models=None):
                   f"p-value={tests['kupiec']['pvalue']:.4f}, "
                   f"exceedance_rate={tests['kupiec']['exceedance_rate']:.4f} "
                   f"(expected={tests['kupiec']['expected_rate']:.4f})")
-            print(f"  ES: tail_error={tests['es']['tail_error']:.6f}, "
-                  f"mean_actual_es={tests['es']['mean_actual_es']:.6f}, "
-                  f"mean_sim_es={tests['es']['mean_sim_es']:.6f}, "
-                  f"n_violations={tests['es']['n_violations']}")
+            es = tests['es']
+            tail_err = f"{es['tail_error']:.6f}" if es['tail_error'] is not None else "N/A"
+            mean_act = f"{es['mean_actual_es']:.6f}" if es['mean_actual_es'] is not None else "N/A"
+            mean_sim = f"{es['mean_sim_es']:.6f}" if es['mean_sim_es'] is not None else "N/A"
+            print(f"  ES: tail_error={tail_err}, mean_actual_es={mean_act}, "
+                  f"mean_sim_es={mean_sim}, n_violations={es['n_violations']}")
             print(f"  VALID: {tests['is_valid']}")
     
     print("\n" + "=" * 60)
@@ -401,10 +439,10 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='시뮬레이터 모델 비교')
     parser.add_argument('--models', nargs='+', 
-                       choices=['GBM', 'Heston', 'GARCH', 'Poisson-Gaussian', 'Merton-JD', 'all'],
+                       choices=['GBM', 'Heston', 'GARCH', 'ARIMA-GARCH', 'Poisson-Gaussian', 'Merton-JD', 'all'],
                        default=['all'],
                        help='비교할 모델 선택 (예: --models GBM Heston 또는 --models all)')
-    parser.add_argument('--n_simulations', type=int, default=1000,
+    parser.add_argument('--n_simulations', type=int, default=5000,
                        help='몬테카를로 시뮬레이션 횟수 (기본값: 100)')
     
     args = parser.parse_args()

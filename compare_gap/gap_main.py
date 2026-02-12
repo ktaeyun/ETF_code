@@ -46,7 +46,7 @@ def load_gap_data():
     return y_series, z_series
 
 
-def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_models=None):
+def run_gap_model_comparison(train_ratio=0.8, n_simulations=5000, selected_models=None):
     """
     괴리율 모델 비교 실행
     
@@ -84,7 +84,7 @@ def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_model
     results_dir.mkdir(parents=True, exist_ok=True)
     
     # 사용 가능한 모델 목록
-    available_models = ['OU', 'Heston-SV', 'GARCH']
+    available_models = ['OU', 'Heston-SV']
     
     # 모델 선택
     if selected_models is None:
@@ -181,45 +181,64 @@ def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_model
                   f"p-value={statistical_tests['kupiec']['pvalue']:.4f}, "
                   f"exceedance_rate={statistical_tests['kupiec']['exceedance_rate']:.4f} "
                   f"(expected={statistical_tests['kupiec']['expected_rate']:.4f})")
-            print(f"    ES: tail_error={statistical_tests['es']['tail_error']:.6f}, "
-                  f"mean_actual_es={statistical_tests['es']['mean_actual_es']:.6f}, "
-                  f"mean_sim_es={statistical_tests['es']['mean_sim_es']:.6f}, "
-                  f"n_violations={statistical_tests['es']['n_violations']}")
+            es = statistical_tests['es']
+            tail_err = f"{es['tail_error']:.6f}" if es['tail_error'] is not None else "N/A"
+            mean_act = f"{es['mean_actual_es']:.6f}" if es['mean_actual_es'] is not None else "N/A"
+            mean_sim = f"{es['mean_sim_es']:.6f}" if es['mean_sim_es'] is not None else "N/A"
+            print(f"    ES: tail_error={tail_err}, mean_actual_es={mean_act}, "
+                  f"mean_sim_es={mean_sim}, n_violations={es['n_violations']}")
             print(f"    VALID: {statistical_tests['is_valid']}")
             
             # 4. 시각화 (몬테카를로 시뮬레이션 모든 경로 사용)
             print(f"\n[3단계] {model_name} 모델 시각화 (몬테카를로 시뮬레이션)")
             print("-" * 60)
             
-            # OU 모델의 경우 수준도 시각화
+            # 수준(level) 경로: OU는 직접 생성, Heston-SV/GARCH는 변화량에서 누적합으로 생성
             actual_level_val = None
             simulated_level_val = None
             monte_carlo_level_array = None
+            closest_level_path_idx = None
             
+            # 검증 구간 수준 경로: 시작점 = 검증 첫 관측값 (OU/Heston-SV/GARCH 동일)
+            # Heston-SV·GARCH는 변화량만 생성하므로 수준을 만들 때 초기값 필요 → 실제 검증 첫 괴리율 사용
+            y0_validation = float(y_val.iloc[0])
+
             if model_name == 'OU':
-                # OU: 수준 데이터 생성
-                # 검증 구간의 수준: y_val는 T+1개, z_val는 T개
-                # 수준 경로는 변화량보다 1개 많아야 함
-                actual_level_val = y_val.values  # 검증 구간의 수준 (전체)
-                
-                # 시뮬레이션된 수준 경로들 생성
+                # OU: 수준 직접 시뮬레이션. 검증 구간과 공정 비교를 위해 시작점을 검증 첫 수준으로 고정
+                actual_level_val = y_val.values
+                _y0_prev = getattr(simulator, 'y0', None)
+                simulator.y0 = y0_validation
                 all_simulated_level_list = []
                 for sim_idx in range(n_simulations):
                     seed = 42 + sim_idx
-                    # T개의 변화량을 얻기 위해 T+1개의 수준 필요
                     simulated_level = simulator.simulate_level(len(z_val) + 1, dt=1.0, seed=seed)
                     all_simulated_level_list.append(simulated_level.values)
-                
+                if _y0_prev is not None:
+                    simulator.y0 = _y0_prev
                 monte_carlo_level_array = np.array(all_simulated_level_list)
                 simulated_level_val = np.median(monte_carlo_level_array, axis=0)
-                
-                # 길이 맞추기 (실제 수준과 동일하게)
-                if len(actual_level_val) != len(simulated_level_val):
-                    min_len = min(len(actual_level_val), len(simulated_level_val))
-                    actual_level_val = actual_level_val[:min_len]
-                    simulated_level_val = simulated_level_val[:min_len]
-                    if monte_carlo_level_array is not None:
-                        monte_carlo_level_array = monte_carlo_level_array[:, :min_len]
+            elif model_name in ('Heston-SV', 'GARCH'):
+                # Heston-SV, GARCH: 변화량만 시뮬레이션 → 수준은 y0 + cumsum(z). y0 = 검증 구간 첫 관측값
+                actual_level_val = y_val.values
+                all_simulated_level_list = []
+                for path_changes in all_simulated_changes_list:
+                    level_path = np.concatenate([[y0_validation], y0_validation + np.cumsum(path_changes)])
+                    all_simulated_level_list.append(level_path)
+                monte_carlo_level_array = np.array(all_simulated_level_list)
+                simulated_level_val = np.median(monte_carlo_level_array, axis=0)
+            
+            # 길이 맞추기 및 실제와 가장 유사한 경로 인덱스 계산
+            if actual_level_val is not None and monte_carlo_level_array is not None:
+                actual_level_val = np.asarray(actual_level_val)
+                min_len = min(len(actual_level_val), monte_carlo_level_array.shape[1])
+                actual_level_val = actual_level_val[:min_len]
+                monte_carlo_level_array = monte_carlo_level_array[:, :min_len]
+                simulated_level_val = simulated_level_val[:min_len]
+                # 실제 경로와 RMSE가 가장 작은 시뮬레이션 경로
+                rmse_per_path = np.sqrt(np.mean((monte_carlo_level_array - actual_level_val) ** 2, axis=1))
+                closest_level_path_idx = int(np.argmin(rmse_per_path))
+                print(f"  수준 경로 초기값(검증 첫 괴리율) y0 = {y0_validation:.6f}")
+                print(f"  실제와 가장 유사한 수준 경로: 시뮬레이션 #{closest_level_path_idx + 1} (RMSE={rmse_per_path[closest_level_path_idx]:.6f})")
             
             create_all_gap_visualizations(
                 actual_changes=z_val.values,
@@ -228,7 +247,8 @@ def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_model
                 simulated_level=simulated_level_val,
                 output_dir=model_dir / 'plots',
                 monte_carlo_changes_paths=monte_carlo_changes_array,
-                monte_carlo_level_paths=monte_carlo_level_array
+                monte_carlo_level_paths=monte_carlo_level_array,
+                closest_level_path_idx=closest_level_path_idx
             )
             
             # 5. 결과 저장
@@ -360,10 +380,12 @@ def run_gap_model_comparison(train_ratio=0.7, n_simulations=1000, selected_model
                   f"p-value={tests['kupiec']['pvalue']:.4f}, "
                   f"exceedance_rate={tests['kupiec']['exceedance_rate']:.4f} "
                   f"(expected={tests['kupiec']['expected_rate']:.4f})")
-            print(f"  ES: tail_error={tests['es']['tail_error']:.6f}, "
-                  f"mean_actual_es={tests['es']['mean_actual_es']:.6f}, "
-                  f"mean_sim_es={tests['es']['mean_sim_es']:.6f}, "
-                  f"n_violations={tests['es']['n_violations']}")
+            es = tests['es']
+            tail_err = f"{es['tail_error']:.6f}" if es['tail_error'] is not None else "N/A"
+            mean_act = f"{es['mean_actual_es']:.6f}" if es['mean_actual_es'] is not None else "N/A"
+            mean_sim = f"{es['mean_sim_es']:.6f}" if es['mean_sim_es'] is not None else "N/A"
+            print(f"  ES: tail_error={tail_err}, mean_actual_es={mean_act}, "
+                  f"mean_sim_es={mean_sim}, n_violations={es['n_violations']}")
             print(f"  VALID: {tests['is_valid']}")
     
     print("\n" + "=" * 60)
@@ -381,7 +403,7 @@ if __name__ == '__main__':
                        help='비교할 모델 선택 (예: --models OU Heston-SV 또는 --models all)')
     parser.add_argument('--train_ratio', type=float, default=0.7,
                        help='학습 구간 비율 (기본값: 0.7)')
-    parser.add_argument('--n_simulations', type=int, default=1000,
+    parser.add_argument('--n_simulations', type=int, default=5000,
                        help='몬테카를로 시뮬레이션 횟수 (기본값: 1000)')
     
     args = parser.parse_args()

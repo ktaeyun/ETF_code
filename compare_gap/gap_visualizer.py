@@ -12,7 +12,8 @@ from scipy import stats
 from statsmodels.tsa.stattools import acf
 
 
-def plot_gap_level_paths(actual_level, simulated_level, save_path=None, monte_carlo_paths=None):
+def plot_gap_level_paths(actual_level, simulated_level, save_path=None, monte_carlo_paths=None,
+                         closest_path_idx=None):
     """
     괴리율 수준 경로 비교 시각화 (몬테카를로 시뮬레이션 지원)
     
@@ -21,6 +22,7 @@ def plot_gap_level_paths(actual_level, simulated_level, save_path=None, monte_ca
         simulated_level: 시뮬레이션된 괴리율 수준 시계열 (단일 경로 또는 대표 경로)
         save_path: 저장 경로 (None이면 표시만)
         monte_carlo_paths: 몬테카를로 시뮬레이션 경로들 (n_paths x T 배열, 선택)
+        closest_path_idx: 실제와 가장 유사한 경로 인덱스 (선택, 강조 표시)
     """
     fig, ax = plt.subplots(figsize=(14, 7))
     
@@ -36,9 +38,17 @@ def plot_gap_level_paths(actual_level, simulated_level, save_path=None, monte_ca
             monte_carlo_paths = np.array(monte_carlo_paths)
         n_paths = len(monte_carlo_paths)
         
-        # 모든 경로를 반투명하게 그림
+        # 모든 경로를 반투명하게 그림 (가장 유사한 경로는 나중에 강조하므로 제외 또는 같이 그림)
         for i, path in enumerate(monte_carlo_paths):
+            if closest_path_idx is not None and i == closest_path_idx:
+                continue  # 가장 유사한 경로는 아래에서 강조
             ax.plot(dates, path, alpha=0.1, linewidth=0.5, color='blue', zorder=1)
+        
+        # 실제와 가장 유사한 경로 강조
+        if closest_path_idx is not None and 0 <= closest_path_idx < n_paths:
+            closest_path = monte_carlo_paths[closest_path_idx]
+            ax.plot(dates, closest_path, label=f'실제와 가장 유사한 경로 (#{closest_path_idx + 1})',
+                    linewidth=2.5, alpha=0.9, color='limegreen', linestyle='-', zorder=7)
         
         # 평균 경로
         mean_path = np.mean(monte_carlo_paths, axis=0)
@@ -58,7 +68,7 @@ def plot_gap_level_paths(actual_level, simulated_level, save_path=None, monte_ca
         
         # 대표 경로 (단일 경로로 전달된 경우)
         if simulated_level is not None:
-            ax.plot(dates, simulated_level, label='대표 경로', 
+            ax.plot(dates, simulated_level, label='대표 경로(중앙값)', 
                     linewidth=1.5, alpha=0.7, color='red', linestyle=':', zorder=6)
     else:
         # 단일 경로만 있는 경우
@@ -315,18 +325,20 @@ def create_all_gap_visualizations(actual_changes, simulated_changes,
                                   actual_level=None, simulated_level=None,
                                   output_dir=None, 
                                   monte_carlo_changes_paths=None,
-                                  monte_carlo_level_paths=None):
+                                  monte_carlo_level_paths=None,
+                                  closest_level_path_idx=None):
     """
     모든 괴리율 모델 시각화 생성 (몬테카를로 시뮬레이션 지원)
     
     Args:
         actual_changes: 실제 변화량 시계열 z_t = Δy_t
         simulated_changes: 시뮬레이션된 변화량 (대표 경로)
-        actual_level: 실제 수준 시계열 y_t (선택, OU 모델용)
-        simulated_level: 시뮬레이션된 수준 (대표 경로, 선택, OU 모델용)
+        actual_level: 실제 수준 시계열 y_t (선택, OU/Heston-SV/GARCH 수준 시각화용)
+        simulated_level: 시뮬레이션된 수준 (대표 경로, 선택)
         output_dir: 출력 디렉토리 (None이면 표시만)
         monte_carlo_changes_paths: 몬테카를로 시뮬레이션 변화량 경로들 (n_paths x T 배열, 선택)
-        monte_carlo_level_paths: 몬테카를로 시뮬레이션 수준 경로들 (n_paths x T 배열, 선택, OU 모델용)
+        monte_carlo_level_paths: 몬테카를로 시뮬레이션 수준 경로들 (n_paths x T 배열, 선택)
+        closest_level_path_idx: 실제와 가장 유사한 수준 경로 인덱스 (선택, 시각화에서 강조)
     """
     print(f"\n시각화 생성 중...")
     
@@ -337,11 +349,12 @@ def create_all_gap_visualizations(actual_changes, simulated_changes,
     else:
         output_path = None
     
-    # 1. 괴리율 수준 경로 비교 (OU 모델용, 수준 데이터가 있는 경우)
+    # 1. 괴리율 수준 경로 비교 (OU/Heston-SV/GARCH, 수준 데이터가 있는 경우)
     if actual_level is not None and simulated_level is not None:
         level_path = output_path / 'gap_level_paths.png' if output_path else None
         plot_gap_level_paths(actual_level, simulated_level, save_path=level_path,
-                            monte_carlo_paths=monte_carlo_level_paths)
+                            monte_carlo_paths=monte_carlo_level_paths,
+                            closest_path_idx=closest_level_path_idx)
     
     # 2. 괴리율 변화량 분포 비교
     changes_dist_path = output_path / 'gap_changes_distribution.png' if output_path else None

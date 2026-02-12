@@ -743,6 +743,64 @@ def pit_ks_test(actual_returns, simulated_returns_paths):
     }
 
 
+def pit_ljungbox_test(actual_returns, simulated_returns_paths, lags=None):
+    """
+    PIT 시계열에 대한 Ljung–Box 검정 (ACF 검정)
+    PIT u_t = ECDF_t(r_t)가 iid U(0,1)이면 자기상관이 0이어야 함.
+    H0: PIT 시계열의 첫 h개 자기상관이 0 (잔차가 백색잡음)
+    
+    Args:
+        actual_returns: 실제 수익률 시계열 (T,)
+        simulated_returns_paths: 시뮬레이션 수익률 경로들 (N x T 배열)
+        lags: 검정에 사용할 lag 수 (None이면 min(10, T//2-1) 또는 [1,...,10])
+    
+    Returns:
+        dict: {'lb_statistic': LB 통계량, 'lb_pvalue': p-value, 'lags': 사용된 lag}
+    """
+    actual_returns = np.array(actual_returns)
+    simulated_returns_paths = np.array(simulated_returns_paths)
+    
+    if simulated_returns_paths.ndim == 1:
+        simulated_returns_paths = simulated_returns_paths.reshape(1, -1)
+    
+    T = len(actual_returns)
+    N = len(simulated_returns_paths)
+    
+    # PIT u_t 계산 (pit_ks_test와 동일)
+    u_t = np.zeros(T)
+    for t in range(T):
+        sim_values_t = simulated_returns_paths[:, t]
+        u_t[t] = np.mean(sim_values_t <= actual_returns[t])
+    
+    # 경계 처리: u_t가 0 또는 1이면 변환 (LB는 연속형 가정)
+    u_t = np.clip(u_t, 1e-6, 1 - 1e-6)
+    
+    if lags is None:
+        lags = min(10, max(1, T // 2 - 1))
+    h = int(lags) if np.isscalar(lags) else int(max(lags))
+    h = max(1, min(h, T // 2 - 1))
+    
+    try:
+        from statsmodels.stats.diagnostic import acorr_ljungbox
+        lb = acorr_ljungbox(u_t, lags=h, return_df=True)
+        # 마지막 lag까지의 joint 검정 결과 사용
+        lb_stat = float(lb['lb_stat'].iloc[-1])
+        lb_pvalue = float(lb['lb_pvalue'].iloc[-1])
+    except Exception:
+        # 수동 계산: LB Q = n(n+2) * sum_{k=1}^{h} r_k^2 / (n-k), Q ~ chi2(h)
+        acf_vals = acf(u_t - np.mean(u_t), nlags=h, fft=True)[1: h + 1]
+        n = len(u_t)
+        q = n * (n + 2) * np.sum(acf_vals**2 / (n - np.arange(1, h + 1)))
+        lb_stat = float(q)
+        lb_pvalue = float(1 - chi2.cdf(q, df=h))
+    
+    return {
+        'lb_statistic': lb_stat,
+        'lb_pvalue': lb_pvalue,
+        'lags': h
+    }
+
+
 def var_kupiec_test(actual_returns, simulated_returns_paths, alpha=0.05):
     """
     VaR-Kupiec 검정
@@ -778,24 +836,26 @@ def var_kupiec_test(actual_returns, simulated_returns_paths, alpha=0.05):
         I_t[t] = actual_returns[t] < var_t[t]
     
     # Kupiec LR_uc 검정
-    x = np.sum(I_t)  # 초과 횟수
-    rate = x / T  # 초과율
+    x = int(np.sum(I_t))  # 초과 횟수
+    rate = x / T if T > 0 else 0.0  # 초과율
     
-    if x == 0:
-        # 초과가 없으면 p-value = 1
+    # LLR = -2 * (log L(H0) - log L(H1)), H0: 초과율=alpha, H1: MLE=x/T
+    # x=0 또는 x=T여도 공식 적용 (logpmf(0,T,0)=0, logpmf(T,T,1)=0)
+    if T == 0:
         lr_uc = 0.0
         pvalue = 1.0
-    elif x == T:
-        # 모두 초과면 p-value = 0
-        lr_uc = np.inf
-        pvalue = 0.0
     else:
-        # LLR = -2 * (log L(H0) - log L(H1))
-        # H0: 실제 초과율 = alpha
-        # H1: 실제 초과율 != alpha
-        lr_uc = -2 * (stats.binom.logpmf(x, T, alpha) - stats.binom.logpmf(x, T, rate))
-        # 카이제곱 분포로 p-value 계산
-        pvalue = 1 - chi2.cdf(lr_uc, df=1)
+        log_l_h0 = stats.binom.logpmf(x, T, alpha)
+        rate_mle = rate
+        if rate_mle <= 0:
+            log_l_h1 = 0.0
+        elif rate_mle >= 1:
+            log_l_h1 = 0.0
+        else:
+            log_l_h1 = stats.binom.logpmf(x, T, rate_mle)
+        lr_uc = float(-2 * (log_l_h0 - log_l_h1))
+        lr_uc = max(0.0, lr_uc)
+        pvalue = float(1 - chi2.cdf(lr_uc, df=1))
     
     return {
         'lr_uc': float(lr_uc),
@@ -855,11 +915,11 @@ def es_test(actual_returns, simulated_returns_paths, alpha=0.05):
     E = np.where(I_t)[0]
     
     if len(E) == 0:
-        # 위반일이 없으면 tail_error = 0 (완벽)
+        # 위반일이 없으면 ES는 정의되지 않음 (0.0으로 두면 오해 소지)
         return {
-            'tail_error': 0.0,
-            'mean_actual_es': 0.0,
-            'mean_sim_es': 0.0,
+            'tail_error': None,
+            'mean_actual_es': None,
+            'mean_sim_es': None,
             'n_violations': 0
         }
     
@@ -880,7 +940,8 @@ def es_test(actual_returns, simulated_returns_paths, alpha=0.05):
 
 def calculate_statistical_tests(actual_returns, simulated_returns_paths, alpha=0.05):
     """
-    통계적 검정 수행 (PIT-KS, VaR-Kupiec, ES)
+    통계적 검정 수행 (수익률 기준). PIT-KS, VaR-Kupiec, ES.
+    NAV 역변환은 괴리율 결합 등 별도 용도로만 사용.
     
     Args:
         actual_returns: 실제 수익률 시계열 (T,)
@@ -888,7 +949,7 @@ def calculate_statistical_tests(actual_returns, simulated_returns_paths, alpha=0
         alpha: VaR 유의수준 (기본값: 0.05)
     
     Returns:
-        dict: {'pit_ks': {...}, 'kupiec': {...}, 'es': {...}}
+        dict: {'pit_ks': {...}, 'kupiec': {...}, 'es': {...}, 'is_valid': bool}
     """
     actual_returns = np.array(actual_returns)
     simulated_returns_paths = np.array(simulated_returns_paths)
@@ -902,9 +963,8 @@ def calculate_statistical_tests(actual_returns, simulated_returns_paths, alpha=0
     # 3. ES 검정
     es_result = es_test(actual_returns, simulated_returns_paths, alpha=alpha)
     
-    # 전체 유효성 판단 (모든 p-value > 0.05)
-    is_valid = (pit_ks_result['ks_pvalue'] > 0.05 and 
-                kupiec_result['pvalue'] > 0.05)
+    # 전체 유효성 판단 (PIT-KS, Kupiec p-value > 0.05)
+    is_valid = (pit_ks_result['ks_pvalue'] > 0.05 and kupiec_result['pvalue'] > 0.05)
     
     return {
         'pit_ks': pit_ks_result,
