@@ -107,12 +107,13 @@ def main():
     # 결과 디렉토리 생성
     settings.ensure_directories()
     
-    # dataset 폴더의 모든 CSV 파일 찾기
+    # dataset/raw 폴더의 모든 CSV 파일 찾기
+    raw_dir = dataset_dir / "raw"
     file_pattern = eda_config["file_pattern"]
-    csv_files = list(dataset_dir.glob(file_pattern))
+    csv_files = list(raw_dir.glob(file_pattern)) if raw_dir.exists() else []
     
     if not csv_files:
-        print(f"{dataset_dir} 폴더에 {file_pattern} 패턴의 파일이 없습니다.")
+        print(f"{raw_dir} 폴더에 {file_pattern} 패턴의 파일이 없습니다.")
         return
     
     print(f"총 {len(csv_files)}개의 CSV 파일을 찾았습니다.")

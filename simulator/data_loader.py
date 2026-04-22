@@ -1,12 +1,14 @@
 """
-NAV 시뮬레이터용 데이터 로더
-- nav_variables.csv: Hash Rate (TH/s), Unique Addresses → 독립변수
-- y_variables.csv: Log Return → 종속변수, etf_premium → GAP
+NAV/GAP/KP 시뮬레이터용 데이터 로더
+- 기본값: dataset/train (nav_train, gap_train, kp_train) + dataset/raw (y_variables: Log Return, etf_premium, Kimchi Premium)
 - Date 기준으로 병합
 """
 
 import pandas as pd
 from pathlib import Path
+
+TRAIN_DIR_NAME = "train"
+RAW_DIR_NAME = "raw"
 
 
 def load_nav_exog_and_returns(
@@ -16,24 +18,24 @@ def load_nav_exog_and_returns(
 ) -> pd.DataFrame:
     """
     NAV 독립변수(Hash Rate, Unique Addresses)와 종속변수(Log Return)를
-    Date 기준으로 병합하여 반환.
+    Date 기준으로 병합하여 반환. 기본값: train/nav_train.csv + raw/y_variables.csv
 
     Args:
-        nav_path: nav_variables.csv 경로 (None이면 base_dir/dataset/nav_variables.csv)
-        y_path: y_variables.csv 경로 (None이면 base_dir/dataset/y_variables.csv)
+        nav_path: nav 경로 (None이면 base_dir/dataset/train/nav_train.csv)
+        y_path: y_variables 경로 (None이면 base_dir/dataset/raw/y_variables.csv)
         base_dir: 프로젝트 루트 (None이면 이 파일 기준 상위 디렉터리)
 
     Returns:
         DataFrame with columns: Date, Log Return, Hash Rate (TH/s), Unique Addresses
-        (그 외 nav/y 컬럼도 포함)
     """
     if base_dir is None:
         base_dir = str(Path(__file__).resolve().parent.parent)
-    dataset_dir = Path(base_dir) / "dataset"
+    train_dir = Path(base_dir) / "dataset" / TRAIN_DIR_NAME
+    raw_dir = Path(base_dir) / "dataset" / RAW_DIR_NAME
     if nav_path is None:
-        nav_path = dataset_dir / "nav_variables.csv"
+        nav_path = train_dir / "nav_train.csv"
     if y_path is None:
-        y_path = dataset_dir / "y_variables.csv"
+        y_path = raw_dir / "y_variables.csv"
     nav_path = Path(nav_path)
     y_path = Path(y_path)
 
@@ -59,19 +61,17 @@ def load_nav_exog_and_returns(
 
 
 def load_gap_exog(
-    nav_path: str = None,
     gap_path: str = None,
     y_path: str = None,
     base_dir: str = None,
 ) -> pd.DataFrame:
     """
-    GAP 독립변수(Search Interest, VIX Volatility)와 종속변수(etf_premium)를
-    Date 기준으로 병합하여 반환.
+    GAP 독립변수와 종속변수(etf_premium)를 Date 기준으로 병합하여 반환.
+    기본값: train/gap_train.csv (value→Search Interest, btc_volatility→VIX Volatility) + raw/y_variables.csv
 
     Args:
-        nav_path: nav_variables.csv 경로 (None이면 base_dir/dataset/nav_variables.csv)
-        gap_path: gap_variables.csv 경로 (None이면 base_dir/dataset/gap_variables.csv)
-        y_path: y_variables.csv 경로 (None이면 base_dir/dataset/y_variables.csv)
+        gap_path: gap 경로 (None이면 base_dir/dataset/train/gap_train.csv)
+        y_path: y_variables 경로 (None이면 base_dir/dataset/raw/y_variables.csv)
         base_dir: 프로젝트 루트 (None이면 이 파일 기준 상위 디렉터리)
 
     Returns:
@@ -79,39 +79,28 @@ def load_gap_exog(
     """
     if base_dir is None:
         base_dir = str(Path(__file__).resolve().parent.parent)
-    dataset_dir = Path(base_dir) / "dataset"
-    if nav_path is None:
-        nav_path = dataset_dir / "nav_variables.csv"
+    train_dir = Path(base_dir) / "dataset" / TRAIN_DIR_NAME
+    raw_dir = Path(base_dir) / "dataset" / RAW_DIR_NAME
     if gap_path is None:
-        gap_path = dataset_dir / "gap_variables.csv"
+        gap_path = train_dir / "gap_train.csv"
     if y_path is None:
-        y_path = dataset_dir / "y_variables.csv"
-    nav_path = Path(nav_path)
+        y_path = raw_dir / "y_variables.csv"
     gap_path = Path(gap_path)
     y_path = Path(y_path)
 
-    nav = pd.read_csv(nav_path)
     gap_df = pd.read_csv(gap_path)
     y_df = pd.read_csv(y_path)
-    nav["Date"] = pd.to_datetime(nav["Date"])
     gap_df["Date"] = pd.to_datetime(gap_df["Date"])
     y_df["Date"] = pd.to_datetime(y_df["Date"])
 
-    # 독립변수: Search Interest (nav_variables에서) + VIX Volatility (gap_variables에서)
-    if "Search Interest" not in nav.columns:
-        raise ValueError("nav_variables에 'Search Interest' 컬럼 없음")
-    if "VIX Volatility" not in gap_df.columns:
-        raise ValueError("gap_variables에 'VIX Volatility' 컬럼 없음")
+    # gap_train: value, btc_volatility → 시뮬레이터 호환명 Search Interest, VIX Volatility
+    if "value" in gap_df.columns and "btc_volatility" in gap_df.columns:
+        gap_df = gap_df.rename(columns={"value": "Search Interest", "btc_volatility": "VIX Volatility"})
+    if "Search Interest" not in gap_df.columns or "VIX Volatility" not in gap_df.columns:
+        raise ValueError("gap 데이터에 'Search Interest', 'VIX Volatility' (또는 value, btc_volatility) 컬럼 필요")
 
-    # 병합: Date 기준
-    # 먼저 nav와 gap을 병합한 후, y와 병합
-    exog_merged = nav[["Date", "Search Interest"]].merge(
-        gap_df[["Date", "VIX Volatility"]],
-        on="Date",
-        how="inner",
-    )
     merged = y_df[["Date", "etf_premium"]].merge(
-        exog_merged,
+        gap_df[["Date", "Search Interest", "VIX Volatility"]],
         on="Date",
         how="inner",
     )
@@ -126,11 +115,11 @@ def load_kp_exog(
 ) -> pd.DataFrame:
     """
     KP 독립변수(volume_btc, KOSPI_Volatility)와 종속변수(Kimchi Premium)를
-    Date 기준으로 병합하여 반환.
+    Date 기준으로 병합하여 반환. 기본값: train/kp_train.csv + raw/y_variables.csv
 
     Args:
-        kp_path: kp_variables.csv 경로 (None이면 base_dir/dataset/kp_variables.csv)
-        y_path: y_variables.csv 경로 (None이면 base_dir/dataset/y_variables.csv)
+        kp_path: kp 경로 (None이면 base_dir/dataset/train/kp_train.csv)
+        y_path: y_variables 경로 (None이면 base_dir/dataset/raw/y_variables.csv)
         base_dir: 프로젝트 루트 (None이면 이 파일 기준 상위 디렉터리)
 
     Returns:
@@ -138,11 +127,12 @@ def load_kp_exog(
     """
     if base_dir is None:
         base_dir = str(Path(__file__).resolve().parent.parent)
-    dataset_dir = Path(base_dir) / "dataset"
+    train_dir = Path(base_dir) / "dataset" / TRAIN_DIR_NAME
+    raw_dir = Path(base_dir) / "dataset" / RAW_DIR_NAME
     if kp_path is None:
-        kp_path = dataset_dir / "kp_variables.csv"
+        kp_path = train_dir / "kp_train.csv"
     if y_path is None:
-        y_path = dataset_dir / "y_variables.csv"
+        y_path = raw_dir / "y_variables.csv"
     kp_path = Path(kp_path)
     y_path = Path(y_path)
 
@@ -172,10 +162,10 @@ def load_etf_true(
     base_dir: str = None,
 ) -> pd.DataFrame:
     """
-    실제 ETF 가격 및 NAV (etf_true, nav_true) 로드
+    실제 ETF 가격 및 NAV (etf_true, nav_true) 로드 (raw 유지)
     
     Args:
-        y_true_path: y_true_variables.csv 경로 (None이면 base_dir/dataset/y_true_variables.csv)
+        y_true_path: y_true_variables.csv 경로 (None이면 base_dir/dataset/raw/y_true_variables.csv)
         base_dir: 프로젝트 루트 (None이면 이 파일 기준 상위 디렉터리)
     
     Returns:
@@ -183,9 +173,9 @@ def load_etf_true(
     """
     if base_dir is None:
         base_dir = str(Path(__file__).resolve().parent.parent)
-    dataset_dir = Path(base_dir) / "dataset"
+    raw_dir = Path(base_dir) / "dataset" / RAW_DIR_NAME
     if y_true_path is None:
-        y_true_path = dataset_dir / "y_true_variables.csv"
+        y_true_path = raw_dir / "y_true_variables.csv"
     y_true_path = Path(y_true_path)
     
     y_true_df = pd.read_csv(y_true_path)

@@ -21,7 +21,7 @@ ASVI 변환된 시계열에 대해 구간 분할(structural break) 을 수행한
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
@@ -668,7 +668,7 @@ def plot_bai_perron(
 def run_bai_perron_pipeline(
     df: pd.DataFrame,
     asvi_columns: List[str],
-    m_max: int = 5,
+    m_max: Union[int, Dict[str, int]] = 5,
     trim: float = 0.10,
     sig_level: float = 0.05,
     hac_bw: Optional[int] = None,
@@ -684,8 +684,9 @@ def run_bai_perron_pipeline(
     asvi_columns : list of str
         검정 대상 컬럼명 목록.
         예: ["asvi_global_btc_svi", "asvi_domestic_btc_svi", "asvi_btc_volume_krw"]
-    m_max : int
-        최대 break 개수.
+    m_max : int or dict[str, int]
+        최대 break 개수. int 이면 전체 컬럼 공통 적용,
+        dict 이면 컬럼별 개별 지정 (예: {"global_btc_svi": 3, "btc_volume_btc": 5}).
     trim : float
         최소 구간 비율 ε.
     sig_level : float
@@ -712,9 +713,10 @@ def run_bai_perron_pipeline(
         print(f"  Processing: {col}")
         print(f"{'='*68}")
 
+        col_m_max = m_max.get(col, 5) if isinstance(m_max, dict) else m_max
         res = fit_bai_perron(
             df[col],
-            m_max     = m_max,
+            m_max     = col_m_max,
             trim      = trim,
             sig_level = sig_level,
             hac_bw    = hac_bw,

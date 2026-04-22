@@ -46,6 +46,13 @@ RESULTS_DIR = _ROOT / "results" / "preprocessing"
 # Bai-Perron 대상 컬럼 (raw 주별 원시값)
 BP_RAW_COLS = ["global_btc_svi", "domestic_btc_svi", "btc_volume_btc"]
 
+# 컬럼별 최대 break 수 (int 로 바꾸면 전체 공통 적용)
+BP_MAX_BREAKS: dict[str, int] = {
+    "global_btc_svi":   3,
+    "domestic_btc_svi": 3,
+    "btc_volume_btc":   5,
+}
+
 
 # ══════════════════════════════════════════════
 # Step 1 — 데이터 로드 및 병합
@@ -122,8 +129,18 @@ def step_har(df_daily: pd.DataFrame, save: bool = True):
 # Step 3 — Bai-Perron: raw 주별 데이터
 # ══════════════════════════════════════════════
 
-def step_bai_perron(df_weekly: pd.DataFrame, save: bool = True) -> dict:
+def step_bai_perron(
+    df_weekly: pd.DataFrame,
+    m_max: "dict[str, int] | int" = BP_MAX_BREAKS,
+    save: bool = True,
+) -> dict:
     """Bai-Perron 검정을 raw 주별 SVI/Volume 에 적용한다.
+
+    Parameters
+    ----------
+    m_max : dict[str, int] or int
+        컬럼별 최대 break 수. 기본값은 모듈 상단의 BP_MAX_BREAKS.
+        int 를 넘기면 모든 컬럼에 동일 적용.
 
     Returns
     -------
@@ -136,7 +153,7 @@ def step_bai_perron(df_weekly: pd.DataFrame, save: bool = True) -> dict:
     return run_bai_perron_pipeline(
         df           = df_weekly,
         asvi_columns = BP_RAW_COLS,
-        m_max        = 3,
+        m_max        = m_max,
         trim         = 0.10,
         sig_level    = 0.05,
         hac_bw       = None,
@@ -221,7 +238,7 @@ def main(
     df_daily, df_weekly = load_data()
 
     har_result  = step_har(df_daily, save=save_plots)
-    bp_results  = step_bai_perron(df_weekly, save=save_plots)
+    bp_results  = step_bai_perron(df_weekly, m_max={"global_btc_svi": 5, "domestic_btc_svi": 4, "btc_volume_btc": 7}, save=save_plots)
     hmm_results = step_hmm(df_daily, har_result,
                             n_init=hmm_n_init, B=hmm_B, save=save_plots)
 

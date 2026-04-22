@@ -18,7 +18,7 @@ plt.rcParams["axes.unicode_minus"] = False
 
 PLOT_DIR = Path(__file__).resolve().parent
 TREND_DIR = PLOT_DIR.parent / "trend"
-DATASET_DIR = PLOT_DIR.parent / "dataset"
+DATASET_DIR = PLOT_DIR.parent / "dataset" / "raw"
 
 
 def load_trend_merged():

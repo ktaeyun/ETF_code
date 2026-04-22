@@ -15,8 +15,11 @@ class Settings:
     
     # ========== 경로 설정 ==========
     DATASET_DIR = PROJECT_ROOT / "dataset"
+    RAW_DATASET_DIR = DATASET_DIR / "raw"  # 원본 데이터 CSV
+    TRAIN_DATASET_DIR = DATASET_DIR / "train"  # 학습용 파생 데이터 (nav_train, gap_train, kp_train)
     RESULTS_DIR = PROJECT_ROOT / "results"
-    EDA_RESULTS_DIR = RESULTS_DIR / "eda_results"
+    EDA_RESULTS_DIR = RESULTS_DIR / "eda_results"  # raw 데이터 EDA 결과
+    EDA_TRAIN_RESULTS_DIR = RESULTS_DIR / "eda_train_results"  # train 데이터 EDA 결과
     VARIABLES_RESULTS_DIR = RESULTS_DIR / "variables_results"
     VARIABLES_DIR = PROJECT_ROOT / "variables"
     EDA_DIR = PROJECT_ROOT / "eda"
@@ -86,17 +89,22 @@ class Settings:
     @classmethod
     def get_nav_variables_path(cls) -> Path:
         """nav_variables.csv 파일 경로 반환"""
-        return cls.DATASET_DIR / cls.NAV_VARIABLES_FILE
-    
+        return cls.RAW_DATASET_DIR / cls.NAV_VARIABLES_FILE
+
     @classmethod
     def get_y_true_variables_path(cls) -> Path:
         """y_true_variables.csv 파일 경로 반환"""
-        return cls.DATASET_DIR / cls.Y_TRUE_VARIABLES_FILE
+        return cls.RAW_DATASET_DIR / cls.Y_TRUE_VARIABLES_FILE
     
     @classmethod
     def get_eda_results_path(cls) -> Path:
-        """EDA 결과 디렉토리 경로 반환"""
+        """EDA 결과 디렉토리 경로 반환 (raw 데이터)"""
         return cls.EDA_RESULTS_DIR
+
+    @classmethod
+    def get_eda_train_results_path(cls) -> Path:
+        """Train 데이터 EDA 결과 디렉토리 경로 반환"""
+        return cls.EDA_TRAIN_RESULTS_DIR
     
     @classmethod
     def get_variables_results_path(cls) -> Path:
@@ -112,6 +120,7 @@ class Settings:
     def ensure_directories(cls):
         """필요한 디렉토리 생성"""
         cls.EDA_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        cls.EDA_TRAIN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         cls.VARIABLES_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         cls.VARIABLES_DIR.mkdir(parents=True, exist_ok=True)
         cls.EDA_DIR.mkdir(parents=True, exist_ok=True)

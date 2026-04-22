@@ -1,8 +1,10 @@
 """
-NAV 및 GAP 시뮬레이터 실행 스크립트
+NAV, GAP, KP 시뮬레이터 실행 스크립트
 - NAV: ARIMAX-GARCH-t (Hash Rate, Unique Addresses)
 - GAP: OU with exog (Search Interest, VIX Volatility)
-- 몬테카를로 시뮬레이션 → 검증(통계검정 + WMCR 등) + 시각화
+- KP: Threshold-OU (volume_btc, KOSPI_Volatility)
+- 결합: NAV*(1+GAP)*(1+KP) → 한국형 비트코인 ETF 가격 (초기 10,000원 앵커)
+- 몬테카를로 시뮬레이션 → 검증 + 시각화
 """
 
 import sys
@@ -586,6 +588,57 @@ def main():
         monte_carlo_returns_paths=simulated_combined_returns_array,
     )
 
+    # ============================================================================
+    # 한국형 비트코인 ETF 가격: NAV*(1+GAP)*(1+KP), 초기 10,000원 앵커링
+    # ============================================================================
+    print("\n" + "=" * 80)
+    print("한국형 비트코인 ETF 가격 (NAV*(1+GAP)*(1+KP), 10,000원 앵커)")
+    print("=" * 80)
+    ANCHOR_KRW = 10000.0
+    min_T_korean = min(T, T_gap, T_kp)
+    actual_nav_k = actual_nav[:min_T_korean]
+    actual_gap_k = actual_gap[:min_T_korean]
+    actual_kp_k = actual_kp[:min_T_korean]
+    # 결합: NAV * (1+GAP) * (1+KP)
+    korean_etf_raw = actual_nav_k * (1.0 + actual_gap_k) * (1.0 + actual_kp_k)
+    korean_etf_actual = korean_etf_raw * (ANCHOR_KRW / korean_etf_raw[0]) if korean_etf_raw[0] != 0 else korean_etf_raw
+
+    # 몬테카를로: 각 경로 NAV*(1+GAP)*(1+KP) 후 10,000원 앵커
+    monte_carlo_korean_etf = np.zeros((args.n_simulations, min_T_korean))
+    for i in range(args.n_simulations):
+        nav_p = monte_carlo_nav_array[i, :min_T_korean]
+        gap_p = monte_carlo_gap_array[i, :min_T_korean]
+        kp_p = monte_carlo_kp_array[i, :min_T_korean]
+        path_raw = nav_p * (1.0 + gap_p) * (1.0 + kp_p)
+        if path_raw[0] != 0:
+            monte_carlo_korean_etf[i] = path_raw * (ANCHOR_KRW / path_raw[0])
+        else:
+            monte_carlo_korean_etf[i] = path_raw
+    korean_etf_representative = np.median(monte_carlo_korean_etf, axis=0)
+    korean_etf_p5 = np.percentile(monte_carlo_korean_etf, 5, axis=0)
+    korean_etf_p95 = np.percentile(monte_carlo_korean_etf, 95, axis=0)
+
+    print(f"  기간: {min_T_korean}일, 초기 가격(앵커): {ANCHOR_KRW:,.0f}원")
+    print(f"  실제 한국형 ETF 초기: {korean_etf_actual[0]:,.2f}원, 종료: {korean_etf_actual[-1]:,.2f}원")
+    print(f"  시뮬 중앙값 종료: {korean_etf_representative[-1]:,.2f}원")
+
+    # 날짜 (NAV/공통 구간 기준)
+    if min_T_korean <= len(df_gap):
+        dates_korean = df_gap["Date"].iloc[:min_T_korean].values
+    else:
+        dates_korean = np.arange(min_T_korean, dtype=object)
+
+    korean_etf_df = pd.DataFrame({
+        "Date": dates_korean,
+        "actual_etf_krw": korean_etf_actual,
+        "simulated_median_krw": korean_etf_representative,
+        "simulated_p5_krw": korean_etf_p5,
+        "simulated_p95_krw": korean_etf_p95,
+    })
+    if not args.no_save:
+        korean_etf_df.to_csv(out_dir / "korean_etf_price.csv", index=False, encoding="utf-8-sig")
+        print(f"  저장: {out_dir / 'korean_etf_price.csv'}")
+
     # 7) 결과 저장
     validation_results = {
         "nav": {
@@ -717,6 +770,7 @@ def main():
         print(f"  - {out_dir / 'gap_simulation_results.csv'}")
         print(f"  - {out_dir / 'kp_simulation_results.csv'}")
         print(f"  - {out_dir / 'combined_simulation_results.csv'}")
+        print(f"  - {out_dir / 'korean_etf_price.csv'}")
         print(f"  - {out_dir / 'plots'}")
 
     return {
@@ -758,7 +812,14 @@ def main():
             "representative_combined": representative_combined,
             "actual_combined": actual_combined,
             "T": min_T,
-        }
+        },
+        "korean_etf": {
+            "actual_etf_krw": korean_etf_actual,
+            "representative_etf_krw": korean_etf_representative,
+            "korean_etf_df": korean_etf_df,
+            "anchor_krw": ANCHOR_KRW,
+            "T": min_T_korean,
+        },
     }
 
 

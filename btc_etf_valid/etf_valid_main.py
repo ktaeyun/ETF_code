@@ -36,7 +36,7 @@ def load_etf_validation_data(gap_unit='decimal'):
         tuple: (merged_df, S0, y0_gap, returns_nav, z_gap, y_gap_series, etf_true, T)
     """
     y_true_path = settings.get_y_true_variables_path()
-    y_var_path = settings.DATASET_DIR / 'y_variables.csv'
+    y_var_path = settings.RAW_DATASET_DIR / 'y_variables.csv'
     
     y_true_df = pd.read_csv(y_true_path)
     y_true_df['Date'] = pd.to_datetime(y_true_df['Date'])

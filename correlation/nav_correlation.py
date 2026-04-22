@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 nav_variables.csv: Hash Rate vs Unique Addresses 상관관계 분석
-- 데이터: dataset/nav_variables.csv
+- 데이터: dataset/raw/nav_variables.csv
 """
 
 import pandas as pd
@@ -14,7 +14,7 @@ plt.rcParams["font.family"] = "Malgun Gothic"
 plt.rcParams["axes.unicode_minus"] = False
 
 CORR_DIR = Path(__file__).resolve().parent
-DATASET_DIR = CORR_DIR.parent / "dataset"
+DATASET_DIR = CORR_DIR.parent / "dataset" / "raw"
 NAV_PATH = DATASET_DIR / "nav_variables.csv"
 
 COL_X = "Hash Rate (TH/s)"

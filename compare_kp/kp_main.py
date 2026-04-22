@@ -25,7 +25,7 @@ def load_kp_data():
     Returns:
         tuple: (수준 시계열 y_t, 변화량 시계열 z_t)
     """
-    data_path = Path(__file__).parent.parent / 'dataset' / 'y_variables.csv'
+    data_path = Path(__file__).parent.parent / 'dataset' / 'raw' / 'y_variables.csv'
     df = pd.read_csv(data_path)
     
     y_series = pd.Series(df['Kimchi Premium'].values)

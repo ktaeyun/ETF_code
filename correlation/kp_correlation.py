@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 kp_variables.csv: KOSPI_Volatility vs Volume 상관관계 분석
-- 데이터: dataset/kp_variables.csv
+- 데이터: dataset/raw/kp_variables.csv
 - Volume = volume_btc
 """
 
@@ -15,7 +15,7 @@ plt.rcParams["font.family"] = "Malgun Gothic"
 plt.rcParams["axes.unicode_minus"] = False
 
 CORR_DIR = Path(__file__).resolve().parent
-DATASET_DIR = CORR_DIR.parent / "dataset"
+DATASET_DIR = CORR_DIR.parent / "dataset" / "raw"
 KP_PATH = DATASET_DIR / "kp_variables.csv"
 
 COL_X = "KOSPI_Volatility"
