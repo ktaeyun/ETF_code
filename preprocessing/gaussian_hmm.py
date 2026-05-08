@@ -80,32 +80,40 @@ class HMMResult:
 
 @dataclass
 class HMMComparison:
-    """K=2 vs K=3 Gaussian HMM 비교 결과."""
+    """K=1 vs K=2 vs K=3 Gaussian HMM 비교 결과."""
 
-    result_k2       : HMMResult
-    result_k3       : HMMResult
-    lrt_stat        : float
-    bootstrap_pvalue: float
-    bootstrap_dist  : np.ndarray   # (B,)
-    optimal_K       : int
-    selection_reason: str
-    series_name     : str = ""
+    result_k1             : HMMResult
+    result_k2             : HMMResult
+    result_k3             : HMMResult
+    lrt_stat_k1k2         : float
+    bootstrap_pvalue_k1k2 : float
+    bootstrap_dist_k1k2   : np.ndarray   # (B,)
+    lrt_stat              : float          # K=2 vs K=3
+    bootstrap_pvalue      : float
+    bootstrap_dist        : np.ndarray   # (B,)
+    optimal_K             : int
+    selection_reason      : str
+    series_name           : str = ""
 
     def print_summary(self) -> None:
-        r2, r3 = self.result_k2, self.result_k3
+        r1, r2, r3 = self.result_k1, self.result_k2, self.result_k3
         print(f"\n{'═'*58}")
         print(f"  HMM Model Comparison  |  Series: {self.series_name}")
         print(f"{'═'*58}")
-        print(f"\n  {'Metric':<22} {'K=2':>12} {'K=3':>12}")
-        print(f"  {'-'*46}")
-        print(f"  {'Log-Likelihood':<22} {r2.loglik:>12.4f} {r3.loglik:>12.4f}")
-        print(f"  {'AIC':<22} {r2.aic:>12.4f} {r3.aic:>12.4f}")
-        print(f"  {'BIC':<22} {r2.bic:>12.4f} {r3.bic:>12.4f}")
-        print(f"  {'N params':<22} {r2.n_params:>12d} {r3.n_params:>12d}")
+        print(f"\n  {'Metric':<22} {'K=1':>10} {'K=2':>10} {'K=3':>10}")
+        print(f"  {'-'*52}")
+        print(f"  {'Log-Likelihood':<22} {r1.loglik:>10.4f} {r2.loglik:>10.4f} {r3.loglik:>10.4f}")
+        print(f"  {'AIC':<22} {r1.aic:>10.4f} {r2.aic:>10.4f} {r3.aic:>10.4f}")
+        print(f"  {'BIC':<22} {r1.bic:>10.4f} {r2.bic:>10.4f} {r3.bic:>10.4f}")
+        print(f"  {'N params':<22} {r1.n_params:>10d} {r2.n_params:>10d} {r3.n_params:>10d}")
+        print(f"\n  Bootstrap LRT (H0: K=1  vs  H1: K=2):")
+        print(f"    Observed statistic : {self.lrt_stat_k1k2:>8.4f}")
+        print(f"    p-value  (B=1000)  : {self.bootstrap_pvalue_k1k2:>8.4f}")
         print(f"\n  Bootstrap LRT (H0: K=2  vs  H1: K=3):")
         print(f"    Observed statistic : {self.lrt_stat:>8.4f}")
         print(f"    p-value  (B=1000)  : {self.bootstrap_pvalue:>8.4f}")
         print(f"\n  Regime Occupancy (>= 10% required):")
+        print(f"    K=1 Regime 0: {r1.occupancy[0]:.1%}  [OK]")
         for k in range(2):
             ok = "OK" if r2.occupancy[k] >= 0.10 else "FAIL"
             print(f"    K=2 Regime {k}: {r2.occupancy[k]:.1%}  [{ok}]")
@@ -116,8 +124,9 @@ class HMMComparison:
         print(f"     Reason   : {self.selection_reason}")
 
     def to_comparison_table(self) -> pd.DataFrame:
-        r2, r3 = self.result_k2, self.result_k3
+        r1, r2, r3 = self.result_k1, self.result_k2, self.result_k3
         return pd.DataFrame({
+            "K=1": [r1.loglik, r1.aic, r1.bic, r1.n_params],
             "K=2": [r2.loglik, r2.aic, r2.bic, r2.n_params],
             "K=3": [r3.loglik, r3.aic, r3.bic, r3.n_params],
         }, index=["Log-Likelihood", "AIC", "BIC", "N_params"])
@@ -243,12 +252,17 @@ def _boot_one(
     var:    np.ndarray,
     n_init: int,
     seed:   int,
+    k_null: int = 2,
+    k_alt:  int = 3,
 ) -> float:
-    """단일 bootstrap 반복 — joblib worker 함수 (top-level 필수)."""
+    """단일 bootstrap 반복 — joblib worker 함수 (top-level 필수).
+
+    k_null 모델로 데이터를 생성한 뒤 k_null 과 k_alt 를 적합하여 LRT 통계량 반환.
+    """
     import warnings
     warnings.filterwarnings("ignore")
 
-    gen = hmmlearn_hmm.GaussianHMM(n_components=len(pi), covariance_type="diag")
+    gen = hmmlearn_hmm.GaussianHMM(n_components=k_null, covariance_type="diag")
     gen.startprob_ = pi
     gen.transmat_  = A
     gen.means_     = mu.reshape(-1, 1)
@@ -257,40 +271,44 @@ def _boot_one(
     y_b, _ = gen.sample(T, random_state=seed)
     y_b    = y_b.flatten()
 
-    ll2 = fit_hmm(y_b, K=2, n_init=n_init, seed=seed).loglik
-    ll3 = fit_hmm(y_b, K=3, n_init=n_init, seed=seed + 1).loglik
-    return -2.0 * (ll2 - ll3)
+    ll_null = fit_hmm(y_b, K=k_null, n_init=n_init, seed=seed).loglik
+    ll_alt  = fit_hmm(y_b, K=k_alt,  n_init=n_init, seed=seed + 1).loglik
+    return -2.0 * (ll_null - ll_alt)
 
 
 def bootstrap_lrt(
-    y:         np.ndarray,
-    result_k2: HMMResult,
-    result_k3: HMMResult,
-    B:         int   = 1000,
-    n_init:    int   = 3,
-    n_jobs:    int   = -1,
-    seed:      int   = 0,
+    y:           np.ndarray,
+    result_null: HMMResult,
+    result_alt:  HMMResult,
+    B:           int   = 1000,
+    n_init:      int   = 3,
+    n_jobs:      int   = -1,
+    seed:        int   = 0,
 ) -> Tuple[float, float, np.ndarray]:
-    """Bootstrap LRT — H0: K=2 vs H1: K=3.  joblib 병렬 실행.
+    """Bootstrap LRT — H0: K=k_null  vs  H1: K=k_alt.  joblib 병렬 실행.
 
     Parameters
     ----------
-    n_jobs : int  병렬 worker 수 (-1 = 전체 코어)
+    result_null : null 가설 모델 (K=k_null)
+    result_alt  : 대립 가설 모델 (K=k_alt)
+    n_jobs      : 병렬 worker 수 (-1 = 전체 코어)
 
     Returns
     -------
     lrt_stat, pvalue, bootstrap_dist : (B,)
     """
     T        = len(y)
-    lrt_stat = -2.0 * (result_k2.loglik - result_k3.loglik)
+    k_null   = result_null.K
+    k_alt    = result_alt.K
+    lrt_stat = -2.0 * (result_null.loglik - result_alt.loglik)
     rng      = np.random.default_rng(seed)
     seeds    = rng.integers(0, 10_000_000, size=B).tolist()
 
     boot_stats = Parallel(n_jobs=n_jobs, verbose=0)(
         delayed(_boot_one)(
-            T, result_k2.pi, result_k2.A,
-            result_k2.mu, result_k2.sigma ** 2,
-            n_init, int(s),
+            T, result_null.pi, result_null.A,
+            result_null.mu, result_null.sigma ** 2,
+            n_init, int(s), k_null, k_alt,
         )
         for s in seeds
     )
@@ -310,44 +328,79 @@ def compare_hmm(
     seed:        int  = 42,
     series_name: str  = "",
 ) -> HMMComparison:
-    """K=2 및 K=3 HMM 적합 후 BIC·Bootstrap LRT·점유율로 최적 K 결정."""
+    """K=1·K=2·K=3 HMM 적합 후 BIC·Bootstrap LRT·점유율로 최적 K 결정.
+
+    선택 절차 (순차)
+    ----------------
+    1. K=1 vs K=2 bootstrap LRT + BIC:
+       둘 다 K=2 를 지지하지 않으면 → K=1 (구간 없음)
+    2. K=2 vs K=3 bootstrap LRT + BIC:
+       둘 다 K=3 을 지지하고 점유율 조건 충족 → K=3, 아니면 → K=2
+    """
+    print(f"  Fitting K=1 ... (n_init={n_init})", flush=True)
+    r1 = fit_hmm(y, K=1, n_init=n_init, seed=seed,     series_name=series_name)
+
     print(f"  Fitting K=2 ... (n_init={n_init})", flush=True)
-    r2 = fit_hmm(y, K=2, n_init=n_init, seed=seed,     series_name=series_name)
+    r2 = fit_hmm(y, K=2, n_init=n_init, seed=seed + 1, series_name=series_name)
 
     print(f"  Fitting K=3 ... (n_init={n_init})", flush=True)
-    r3 = fit_hmm(y, K=3, n_init=n_init, seed=seed + 1, series_name=series_name)
+    r3 = fit_hmm(y, K=3, n_init=n_init, seed=seed + 2, series_name=series_name)
 
-    print(f"  Bootstrap LRT ... (B={B}, parallel)", flush=True)
-    lrt_stat, pval, boot_dist = bootstrap_lrt(
-        y, r2, r3, B=B, n_init=3, n_jobs=-1, seed=seed + 2
+    print(f"  Bootstrap LRT K=1 vs K=2 ... (B={B}, parallel)", flush=True)
+    lrt_k1k2, pval_k1k2, boot_k1k2 = bootstrap_lrt(
+        y, r1, r2, B=B, n_init=3, n_jobs=-1, seed=seed + 3
+    )
+
+    print(f"  Bootstrap LRT K=2 vs K=3 ... (B={B}, parallel)", flush=True)
+    lrt_k2k3, pval_k2k3, boot_k2k3 = bootstrap_lrt(
+        y, r2, r3, B=B, n_init=3, n_jobs=-1, seed=seed + 4
     )
 
     # ── 최적 K 결정 ─────────────────────────────
-    occupancy_ok_k3 = all(r3.occupancy >= 0.10)
-    bic_prefers_k3  = r3.bic < r2.bic
-    lrt_rejects_k2  = pval < 0.05
+    # Step 1: K=1 vs K=2
+    occupancy_ok_k2 = all(r2.occupancy >= 0.10)
+    bic_k2_over_k1  = r2.bic < r1.bic
+    lrt_rejects_k1  = pval_k1k2 < 0.05
 
-    if not occupancy_ok_k3:
-        optimal_K = 2
-        reason    = "K=3 regime occupancy < 10%: K=2 selected"
-    elif bic_prefers_k3 and lrt_rejects_k2:
-        optimal_K = 3
-        reason    = f"BIC favors K=3 and Bootstrap LRT rejects K=2 (p={pval:.3f})"
-    elif bic_prefers_k3 and not lrt_rejects_k2:
-        optimal_K = 2
-        reason    = (f"BIC favors K=3 but Bootstrap LRT fails to reject K=2 "
-                     f"(p={pval:.3f}): K=2 selected (parsimony)")
-    elif not bic_prefers_k3 and lrt_rejects_k2:
-        optimal_K = 2
-        reason    = (f"BIC favors K=2; LRT rejects K=2 (p={pval:.3f}) "
-                     f"but BIC penalty dominates: K=2 selected")
+    if not occupancy_ok_k2 or not bic_k2_over_k1 or not lrt_rejects_k1:
+        optimal_K = 1
+        if not occupancy_ok_k2:
+            reason = "K=2 regime occupancy < 10%: single regime (K=1) selected"
+        elif not bic_k2_over_k1:
+            reason = f"BIC favors K=1 over K=2: single regime selected"
+        else:
+            reason = (f"BIC favors K=2 but Bootstrap LRT fails to reject K=1 "
+                      f"(p={pval_k1k2:.3f}): K=1 selected (parsimony)")
     else:
-        optimal_K = 2
-        reason    = f"BIC and Bootstrap LRT both favor K=2 (p={pval:.3f})"
+        # Step 2: K=2 vs K=3
+        occupancy_ok_k3 = all(r3.occupancy >= 0.10)
+        bic_k3_over_k2  = r3.bic < r2.bic
+        lrt_rejects_k2  = pval_k2k3 < 0.05
+
+        if not occupancy_ok_k3:
+            optimal_K = 2
+            reason    = "K=3 regime occupancy < 10%: K=2 selected"
+        elif bic_k3_over_k2 and lrt_rejects_k2:
+            optimal_K = 3
+            reason    = (f"BIC favors K=3 and Bootstrap LRT rejects K=2 "
+                         f"(p={pval_k2k3:.3f})")
+        elif bic_k3_over_k2 and not lrt_rejects_k2:
+            optimal_K = 2
+            reason    = (f"BIC favors K=3 but Bootstrap LRT fails to reject K=2 "
+                         f"(p={pval_k2k3:.3f}): K=2 selected (parsimony)")
+        elif not bic_k3_over_k2 and lrt_rejects_k2:
+            optimal_K = 2
+            reason    = (f"BIC favors K=2; LRT rejects K=2 (p={pval_k2k3:.3f}) "
+                         f"but BIC penalty dominates: K=2 selected")
+        else:
+            optimal_K = 2
+            reason    = f"BIC and Bootstrap LRT both favor K=2 (p={pval_k2k3:.3f})"
 
     return HMMComparison(
-        result_k2=r2, result_k3=r3,
-        lrt_stat=lrt_stat, bootstrap_pvalue=pval, bootstrap_dist=boot_dist,
+        result_k1=r1, result_k2=r2, result_k3=r3,
+        lrt_stat_k1k2=lrt_k1k2, bootstrap_pvalue_k1k2=pval_k1k2,
+        bootstrap_dist_k1k2=boot_k1k2,
+        lrt_stat=lrt_k2k3, bootstrap_pvalue=pval_k2k3, bootstrap_dist=boot_k2k3,
         optimal_K=optimal_K, selection_reason=reason,
         series_name=series_name,
     )
@@ -462,42 +515,59 @@ def plot_hmm_comparison(
     comp:      HMMComparison,
     save_path: Optional[str] = None,
 ) -> plt.Figure:
-    """K=2 vs K=3 비교 시각화."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    """K=1 vs K=2 vs K=3 비교 시각화 (1×3 레이아웃).
 
-    ax = axes[0]
-    ax.hist(comp.bootstrap_dist, bins=50, color="#4d9de0", alpha=0.7,
-            density=True, label="Bootstrap LRT dist (H0: K=2)")
-    ax.axvline(x=comp.lrt_stat, color="#e15759", linewidth=2.0,
-               label=f"Observed LRT = {comp.lrt_stat:.3f}")
-    p95 = np.percentile(comp.bootstrap_dist, 95)
-    ax.axvline(x=p95, color="#f28e2b", linewidth=1.5, linestyle="--",
-               label=f"95th pct = {p95:.3f}")
-    ax.set_xlabel("LRT Statistic")
-    ax.set_ylabel("Density")
-    ax.set_title(
-        f"Bootstrap LRT  |  {comp.series_name}\n"
-        f"p-value = {comp.bootstrap_pvalue:.3f}  "
-        f"({'reject K=2' if comp.bootstrap_pvalue < 0.05 else 'fail to reject K=2'})",
-        fontsize=9)
-    ax.legend(fontsize=8)
-    ax.grid(True, linestyle="--", alpha=0.4)
+    Panel 1 : Bootstrap LRT  H0=K=1 vs H1=K=2
+    Panel 2 : Bootstrap LRT  H0=K=2 vs H1=K=3
+    Panel 3 : BIC / AIC 막대 (K=1, K=2, K=3)
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
-    ax2   = axes[1]
-    x     = np.arange(2)
+    def _lrt_panel(ax, boot_dist, lrt_stat, pval, h0_label, h1_label):
+        ax.hist(boot_dist, bins=50, color="#4d9de0", alpha=0.7, density=True,
+                label=f"Bootstrap dist (H0: {h0_label})")
+        ax.axvline(x=lrt_stat, color="#e15759", linewidth=2.0,
+                   label=f"Observed = {lrt_stat:.3f}")
+        p95 = np.percentile(boot_dist, 95)
+        ax.axvline(x=p95, color="#f28e2b", linewidth=1.5, linestyle="--",
+                   label=f"95th pct = {p95:.3f}")
+        reject = pval < 0.05
+        ax.set_title(
+            f"Bootstrap LRT  H0:{h0_label} vs H1:{h1_label}\n"
+            f"{comp.series_name}  p={pval:.3f}  "
+            f"({'reject ' + h0_label if reject else 'fail to reject ' + h0_label})",
+            fontsize=9)
+        ax.set_xlabel("LRT Statistic")
+        ax.set_ylabel("Density")
+        ax.legend(fontsize=7)
+        ax.grid(True, linestyle="--", alpha=0.4)
+
+    _lrt_panel(axes[0], comp.bootstrap_dist_k1k2, comp.lrt_stat_k1k2,
+               comp.bootstrap_pvalue_k1k2, "K=1", "K=2")
+    _lrt_panel(axes[1], comp.bootstrap_dist,      comp.lrt_stat,
+               comp.bootstrap_pvalue,      "K=2", "K=3")
+
+    ax3   = axes[2]
+    x     = np.arange(3)
     width = 0.35
-    ax2.bar(x - width / 2, [comp.result_k2.bic, comp.result_k3.bic],
-            width, label="BIC", color="#4e79a7", alpha=0.8)
-    ax2.bar(x + width / 2, [comp.result_k2.aic, comp.result_k3.aic],
-            width, label="AIC", color="#f28e2b", alpha=0.8)
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(["K=2", "K=3"])
-    ax2.set_ylabel("Information Criterion")
-    ax2.set_title(
-        f"BIC / AIC Comparison  |  {comp.series_name}\nOptimal K = {comp.optimal_K}",
+    bics  = [comp.result_k1.bic, comp.result_k2.bic, comp.result_k3.bic]
+    aics  = [comp.result_k1.aic, comp.result_k2.aic, comp.result_k3.aic]
+    bars_bic = ax3.bar(x - width / 2, bics, width, label="BIC",
+                       color="#4e79a7", alpha=0.8)
+    bars_aic = ax3.bar(x + width / 2, aics, width, label="AIC",
+                       color="#f28e2b", alpha=0.8)
+    # 최적 K 에 별표
+    opt_idx = comp.optimal_K - 1
+    ax3.text(opt_idx - width / 2, bics[opt_idx],
+             "★", ha="center", va="bottom", fontsize=12, color="#4e79a7")
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(["K=1", "K=2", "K=3"])
+    ax3.set_ylabel("Information Criterion")
+    ax3.set_title(
+        f"BIC / AIC  |  {comp.series_name}\nOptimal K = {comp.optimal_K}",
         fontsize=9)
-    ax2.legend(fontsize=8)
-    ax2.grid(True, linestyle="--", alpha=0.4, axis="y")
+    ax3.legend(fontsize=8)
+    ax3.grid(True, linestyle="--", alpha=0.4, axis="y")
 
     fig.suptitle(
         f"HMM Model Selection  |  {comp.series_name}  |  Optimal K={comp.optimal_K}",
@@ -536,9 +606,11 @@ def run_hmm_pipeline(
     comp.print_summary()
 
     if plot:
+        save_k1 = str(Path(save_dir) / f"hmm_{name}_K1.png")         if save_dir else None
         save_k2 = str(Path(save_dir) / f"hmm_{name}_K2.png")         if save_dir else None
         save_k3 = str(Path(save_dir) / f"hmm_{name}_K3.png")         if save_dir else None
         save_cp = str(Path(save_dir) / f"hmm_{name}_comparison.png") if save_dir else None
+        plot_hmm_result(comp.result_k1, series.dropna(), save_path=save_k1)
         plot_hmm_result(comp.result_k2, series.dropna(), save_path=save_k2)
         plot_hmm_result(comp.result_k3, series.dropna(), save_path=save_k3)
         plot_hmm_comparison(comp, save_path=save_cp)
