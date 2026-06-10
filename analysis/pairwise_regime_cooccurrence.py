@@ -163,10 +163,8 @@ def _lift_grade(n_AB: int, lift: float) -> str:
         return "공통발생 없음"
     if np.isnan(lift):
         return "N/A"
-    if lift >= 1.2:
+    if lift >= 1.0:
         return "경험적 근거 강함"
-    if lift >= 0.8:
-        return "중립/추가검토"
     return "경험적 근거 약함"
 
 
@@ -250,7 +248,6 @@ def compute_pairwise_cooccurrence(df: pd.DataFrame) -> pd.DataFrame:
 
 _GRADE_COLORS = {
     "경험적 근거 강함": "C6EFCE",   # 녹색
-    "중립/추가검토"   : "FFEB9C",   # 노랑
     "경험적 근거 약함": "FFC7CE",   # 빨강
     "공통발생 없음"   : "D9D9D9",   # 회색
 }
@@ -292,7 +289,7 @@ def save_to_excel(df_result: pd.DataFrame, df_regime: pd.DataFrame) -> None:
     """분석 결과를 3개 시트 Excel 파일로 저장.
 
     Sheet 1 '공통빈도 분석' : 전체 long-format 결과
-    Sheet 2 '경험적 근거 강함': Lift >= 1.2 행, Lift 내림차순 정렬
+    Sheet 2 '경험적 근거 강함': Lift >= 1.0 행, Lift 내림차순 정렬
     Sheet 3 '레짐 분포'      : 변수별 레짐 분포 요약
     """
     SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -356,7 +353,7 @@ def save_to_excel(df_result: pd.DataFrame, df_regime: pd.DataFrame) -> None:
     print("=" * 60)
     print(f"  경로   : {SAVE_PATH}")
     print(f"  총 행수: {len(df_result)}")
-    for grade in ["경험적 근거 강함", "중립/추가검토", "경험적 근거 약함", "공통발생 없음"]:
+    for grade in ["경험적 근거 강함", "경험적 근거 약함", "공통발생 없음"]:
         cnt = grade_counts.get(grade, 0)
         print(f"    {grade:<15}: {cnt}")
 
@@ -390,7 +387,7 @@ if __name__ == "__main__":
         print("  (해당 없음)")
 
     print("\n[Lift 하위 10 — 경험적 근거 약함 / 공통발생 없음]")
-    low = df_result[df_result["empirical_grade"].isin(["경험적 근거 약함", "공통발생 없음"])]
+    low = df_result[df_result["empirical_grade"] == "경험적 근거 약함"]
     print(low.head(10)[[
         "var_A", "regime_A", "var_B", "regime_B",
         "n_AB", "T", "Lift", "empirical_grade",
