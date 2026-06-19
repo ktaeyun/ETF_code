@@ -6,7 +6,6 @@
 현재 모듈:
   - asvi_transformer : ASVI(Abnormal Search Volume Index) 변환
   - har_vkospi       : HAR(Heterogeneous Autoregressive) 모형 — VKOSPI 잔차 추출
-  - bai_perron       : Bai-Perron (1998, 2003) 다중 구조 변화 검정
   - gaussian_hmm     : Gaussian HMM — K=2/3 상태 구간 분할 (EM + Bootstrap LRT)
 """
 
@@ -28,17 +27,6 @@ from preprocessing.har_vkospi import (
     fit_har,
     plot_har_result,
     run_har_pipeline,
-)
-from preprocessing.bai_perron import (
-    SUPF_CV,
-    UDMAX_CV,
-    WDMAX_CV,
-    SEQ_CV,
-    SegmentInfo,
-    BaiPerronResult,
-    fit_bai_perron,
-    plot_bai_perron,
-    run_bai_perron_pipeline,
 )
 from preprocessing.gaussian_hmm import (
     HMMResult,
@@ -69,16 +57,6 @@ __all__ = [
     "fit_har",
     "plot_har_result",
     "run_har_pipeline",
-    # Bai-Perron
-    "SUPF_CV",
-    "UDMAX_CV",
-    "WDMAX_CV",
-    "SEQ_CV",
-    "SegmentInfo",
-    "BaiPerronResult",
-    "fit_bai_perron",
-    "plot_bai_perron",
-    "run_bai_perron_pipeline",
     # Gaussian HMM
     "HMMResult",
     "HMMComparison",

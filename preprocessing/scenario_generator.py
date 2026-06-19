@@ -32,6 +32,7 @@ Gaussian HMM 레짐 기반 시나리오 시계열 생성 파이프라인.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -57,6 +58,15 @@ VARIABLE_CONFIG: dict[str, dict] = {
 
 # 시나리오 타입: {변수명 → 레짐 번호(μ 오름차순 기준)}
 Scenario = Dict[str, int]
+
+# final_scenarios_latest.csv 의 display 컬럼 → ScenarioHMMResult var_name 매핑
+_DISPLAY_TO_VAR: dict[str, str] = {
+    "Bitcoin_RV": "Global_RV",
+    "VKOSPI":     "VKOSPI_resid",
+    "KR_Volume":  "btc_volume_btc",
+    "KR_SVI":     "domestic_btc_svi",
+    "Global_SVI": "global_btc_svi",
+}
 
 _REGIME_COLORS = ["#2c7bb6", "#d7191c", "#1a9641", "#fdae61"]
 
@@ -340,6 +350,75 @@ def define_scenario(regime_dict: Dict[str, int]) -> Scenario:
     ... })
     """
     return dict(regime_dict)
+
+
+# ══════════════════════════════════════════════
+# CSV 시나리오 로드
+# ══════════════════════════════════════════════
+
+def scenarios_from_csv(
+    csv_path:    "Path | str",
+    hmm_results: Dict[str, "ScenarioHMMResult"],
+) -> Dict[str, Scenario]:
+    """final_scenarios_latest.csv → {Scenario_ID: Scenario} 변환.
+
+    의미적 레이블(Low/Mid/High/Normal/Extreme)을 μ 오름차순 기준
+    정수 레짐 번호로 변환한다.
+
+    Parameters
+    ----------
+    csv_path    : final_scenarios_latest.csv 경로
+    hmm_results : from_pipeline_results() 반환값 (K 조회용)
+
+    Returns
+    -------
+    {Scenario_ID → {var_name → int}}
+    """
+    _VKOSPI_MAP = {
+        2: {"Normal": 0, "Extreme": 1},
+        3: {"Low": 0, "Normal": 1, "Extreme": 2},
+    }
+    _DEFAULT_MAP = {
+        2: {"Low": 0, "High": 1},
+        3: {"Low": 0, "Mid": 1, "High": 2},
+    }
+
+    # 변수별 레이블 → 정수 매핑 (K는 hmm_results 에서 조회)
+    label_to_state: dict[str, dict[str, int]] = {}
+    for disp_col, var_name in _DISPLAY_TO_VAR.items():
+        res = hmm_results.get(var_name)
+        if res is None:
+            continue
+        K = res.n_states
+        if var_name == "VKOSPI_resid":
+            label_to_state[disp_col] = _VKOSPI_MAP.get(K, {})
+        else:
+            label_to_state[disp_col] = _DEFAULT_MAP.get(K, {})
+
+    df = pd.read_csv(Path(csv_path))
+    named: Dict[str, Scenario] = {}
+
+    for _, row in df.iterrows():
+        sid = str(row["Scenario_ID"])
+        scenario: Scenario = {}
+        ok = True
+        for disp_col, var_name in _DISPLAY_TO_VAR.items():
+            label = row.get(disp_col)
+            if pd.isna(label) or str(label).strip() in ("", "-"):
+                print(f"  [!] {sid}: {disp_col} 레이블 누락 — 건너뜀")
+                ok = False
+                break
+            state = label_to_state.get(disp_col, {}).get(str(label))
+            if state is None:
+                print(f"  [!] {sid}: {disp_col}='{label}' 미인식 — 건너뜀")
+                ok = False
+                break
+            scenario[var_name] = state
+        if ok:
+            named[sid] = scenario
+
+    print(f"  로드 완료: {len(named)}개 시나리오  {list(named.keys())}")
+    return named
 
 
 # ══════════════════════════════════════════════
@@ -701,7 +780,6 @@ if __name__ == "__main__":
       python -m preprocessing.scenario_generator
     """
     import sys
-    from pathlib import Path
 
     _ROOT = Path(__file__).resolve().parent.parent
     if str(_ROOT) not in sys.path:
@@ -719,24 +797,31 @@ if __name__ == "__main__":
     for res in hmm_results.values():
         res.print_summary()
 
-    # ── Step 3: 시나리오 정의 ────────────────────────────────
-    # 각 레짐 번호 범위는 print_summary() 결과를 보고 결정
-    scenarios = {
-        "bull": define_scenario({
-            "Global_RV":         0,   # 저변동성
-            "global_btc_svi":    1,   # 고관심
-            "domestic_btc_svi":  1,
-            "btc_volume_btc":    1,   # 고거래량
-            "VKOSPI_resid":      0,
-        }),
-        "stress": define_scenario({
-            "Global_RV":         1,   # 고변동성
-            "global_btc_svi":    0,   # 저관심
-            "domestic_btc_svi":  0,
-            "btc_volume_btc":    0,   # 저거래량
-            "VKOSPI_resid":      1,
-        }),
-    }
+    # ── Step 3: 시나리오 로드 (final_scenarios_latest.csv) ──
+    _SCENARIO_CSV = _ROOT / "results" / "scenario_selection" / "final_scenarios_latest.csv"
+    if _SCENARIO_CSV.exists():
+        print(f"\n=== 시나리오 CSV 로드: {_SCENARIO_CSV.name} ===")
+        scenarios = scenarios_from_csv(_SCENARIO_CSV, hmm_results)
+    else:
+        print(f"\n[!] 시나리오 CSV 없음: {_SCENARIO_CSV}")
+        print("    analysis/scenario_selection.py 를 먼저 실행하세요.")
+        print("    fallback: 기본 bull/stress 시나리오 사용\n")
+        scenarios = {
+            "bull": define_scenario({
+                "Global_RV":        0,
+                "global_btc_svi":   1,
+                "domestic_btc_svi": 1,
+                "btc_volume_btc":   1,
+                "VKOSPI_resid":     0,
+            }),
+            "stress": define_scenario({
+                "Global_RV":        1,
+                "global_btc_svi":   0,
+                "domestic_btc_svi": 0,
+                "btc_volume_btc":   0,
+                "VKOSPI_resid":     1,
+            }),
+        }
 
     # ── Step 4: 시나리오 파이프라인 실행 ────────────────────
     outputs = run_scenario_pipeline(
@@ -750,8 +835,9 @@ if __name__ == "__main__":
     )
 
     # ── Step 5: 단일 시나리오 시계열 확인 (원본 스케일) ──────
+    first_sid = next(iter(scenarios))
     df_single = generate_scenario_series(
-        hmm_results, scenarios["bull"], T=252, seed=0, inverse=True,
+        hmm_results, scenarios[first_sid], T=252, seed=0, inverse=True,
     )
-    print("\n=== 단일 시나리오 샘플 (첫 5행, 원본 스케일) ===")
+    print(f"\n=== 단일 시나리오 샘플 [{first_sid}] (첫 5행, 원본 스케일) ===")
     print(df_single.head())

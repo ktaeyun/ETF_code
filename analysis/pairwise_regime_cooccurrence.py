@@ -43,6 +43,19 @@ REGIME_COLS = [
 
 SAVE_PATH = _ROOT / "results" / "pairwise_regime_cooccurrence_results.xlsx"
 
+# 시나리오 외생변수 생성용
+_COL_MAP: dict[str, str] = {
+    "Global_RV_regime":        "Bitcoin_RV",
+    "VKOSPI_resid_regime":     "VKOSPI",
+    "btc_volume_btc_regime":   "KR_Volume",
+    "domestic_btc_svi_regime": "KR_SVI",
+    "global_btc_svi_regime":   "Global_SVI",
+}
+_DISPLAY_COLS = ["Bitcoin_RV", "VKOSPI", "KR_Volume", "KR_SVI", "Global_SVI"]
+
+SCENARIO_CSV_PATH = _ROOT / "results" / "scenario_selection" / "final_scenarios_latest.csv"
+EXOG_SAVE_PATH    = _ROOT / "results" / "scenario_exog_vars"
+
 
 # ══════════════════════════════════════════════════════════════
 # Step 1: HMM 레짐 DataFrame 구축
@@ -359,6 +372,167 @@ def save_to_excel(df_result: pd.DataFrame, df_regime: pd.DataFrame) -> None:
 
 
 # ══════════════════════════════════════════════════════════════
+# Step 4: 시나리오 기반 외생변수 생성
+# ══════════════════════════════════════════════════════════════
+
+def _make_label_maps(df_regime: pd.DataFrame) -> dict[str, dict[int, str]]:
+    """각 변수 HMM 상태 수(K)에 따라 의미적 레이블 매핑 반환.
+
+    scenario_selection.py 와 동일한 규칙 (circular import 방지를 위해 인라인).
+    """
+    VKOSPI_LABELS = {
+        2: {0: "Normal", 1: "Extreme"},
+        3: {0: "Low",    1: "Normal",  2: "Extreme"},
+    }
+    DEFAULT_LABELS = {
+        2: {0: "Low", 1: "High"},
+        3: {0: "Low", 1: "Mid",  2: "High"},
+    }
+    maps: dict[str, dict[int, str]] = {}
+    for regime_col, display_col in _COL_MAP.items():
+        if regime_col not in df_regime.columns:
+            continue
+        K = int(df_regime[regime_col].dropna().nunique())
+        if regime_col == "VKOSPI_resid_regime":
+            state_map = VKOSPI_LABELS.get(K, {i: f"S{i}" for i in range(K)})
+        else:
+            state_map = DEFAULT_LABELS.get(K, {i: f"S{i}" for i in range(K)})
+        maps[display_col] = state_map
+    return maps
+
+
+def _build_daily_labeled(
+    df_regime: pd.DataFrame,
+    label_maps: dict[str, dict[int, str]],
+) -> pd.DataFrame:
+    """정수 HMM 상태 → 의미적 문자열 레이블로 변환한 일별 DataFrame 반환.
+
+    5개 변수 모두 유효한 행만 유지.
+    """
+    rows: dict[str, pd.Series] = {}
+    for regime_col, display_col in _COL_MAP.items():
+        if regime_col not in df_regime.columns:
+            continue
+        rows[display_col] = (
+            df_regime[regime_col]
+            .dropna()
+            .astype(int)
+            .map(label_maps[display_col])
+        )
+    df = pd.concat(rows, axis=1).dropna()
+    df.index.name = "Date"
+    return df
+
+
+def build_scenario_exog(
+    df_regime: pd.DataFrame,
+    scenario_csv: Path = SCENARIO_CSV_PATH,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """사전 정의된 시나리오 CSV 기반으로 외생변수 더미 DataFrame 생성.
+
+    Parameters
+    ----------
+    df_regime    : build_regime_df() 반환 DataFrame
+    scenario_csv : final_scenarios_latest.csv 경로
+
+    Returns
+    -------
+    df_exog   : DatetimeIndex × Scenario_ID 바이너리 더미 (0/1)
+    df_labeled: DatetimeIndex × 의미적 레이블 (Low/Mid/High 등)
+    """
+    if not scenario_csv.exists():
+        raise FileNotFoundError(
+            f"시나리오 CSV 없음: {scenario_csv}\n"
+            "analysis/scenario_selection.py 를 먼저 실행하세요."
+        )
+
+    scenarios = pd.read_csv(scenario_csv)
+    print(f"  시나리오 로드: {len(scenarios)}개  ({scenario_csv.name})")
+
+    label_maps = _make_label_maps(df_regime)
+    print("\n  레이블 매핑:")
+    for col, smap in label_maps.items():
+        print(f"    {col:15s} : {smap}")
+
+    df_labeled = _build_daily_labeled(df_regime, label_maps)
+    T = len(df_labeled)
+    print(f"\n  완전 관측 일수 (T) : {T}")
+
+    active_cols = [c for c in _DISPLAY_COLS if c in df_labeled.columns]
+    exog_cols: dict[str, pd.Series] = {}
+
+    print("\n  시나리오별 활성 일수:")
+    for _, row in scenarios.iterrows():
+        sid   = str(row["Scenario_ID"])
+        mask  = pd.Series(True, index=df_labeled.index)
+        for col in active_cols:
+            val = row.get(col)
+            if pd.notna(val) and str(val) not in ("", "-"):
+                mask &= df_labeled[col] == str(val)
+        exog_cols[sid] = mask.astype(int)
+        n_active   = int(mask.sum())
+        combo_label = row.get("combo_label", "")
+        print(f"    {sid}: {n_active:4d}일 ({n_active/T:.1%})  [{combo_label}]")
+
+    df_exog = pd.DataFrame(exog_cols, index=df_labeled.index)
+
+    # 어느 시나리오에도 해당하지 않는 날
+    n_no_scenario = int((df_exog.sum(axis=1) == 0).sum())
+    print(f"\n  미분류(어떤 시나리오에도 해당 없음): {n_no_scenario}일 ({n_no_scenario/T:.1%})")
+
+    return df_exog, df_labeled
+
+
+def save_exog(
+    df_exog: pd.DataFrame,
+    df_labeled: pd.DataFrame,
+    save_dir: Path = EXOG_SAVE_PATH,
+) -> None:
+    """외생변수 DataFrame 을 CSV + Excel 2시트로 저장."""
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path  = save_dir / "scenario_exog_vars.csv"
+    xlsx_path = save_dir / "scenario_exog_vars.xlsx"
+
+    df_exog.to_csv(csv_path)
+    print(f"\n  CSV 저장 : {csv_path}")
+
+    df_combined = pd.concat([df_labeled, df_exog], axis=1)
+
+    try:
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+
+        with pd.ExcelWriter(str(xlsx_path), engine="openpyxl") as writer:
+            df_exog.to_excel(writer,    sheet_name="시나리오 더미")
+            df_combined.to_excel(writer, sheet_name="레이블+더미")
+            df_labeled.to_excel(writer,  sheet_name="의미적 레이블")
+
+            # 더미 시트: 1인 셀 강조
+            ws = writer.sheets["시나리오 더미"]
+            fill_on  = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+            fill_hdr = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            for cell in ws[1]:
+                cell.fill = fill_hdr
+                cell.font = Font(color="FFFFFF", bold=True)
+                cell.alignment = Alignment(horizontal="center")
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    if cell.value == 1:
+                        cell.fill = fill_on
+            for ci in range(1, ws.max_column + 1):
+                ws.column_dimensions[get_column_letter(ci)].width = 12
+
+    except ImportError:
+        with pd.ExcelWriter(str(xlsx_path)) as writer:
+            df_exog.to_excel(writer,    sheet_name="시나리오 더미")
+            df_combined.to_excel(writer, sheet_name="레이블+더미")
+            df_labeled.to_excel(writer,  sheet_name="의미적 레이블")
+
+    print(f"  Excel 저장: {xlsx_path}")
+
+
+# ══════════════════════════════════════════════════════════════
 # 메인 실행
 # ══════════════════════════════════════════════════════════════
 
@@ -395,3 +569,14 @@ if __name__ == "__main__":
 
     # ── Excel 저장 ─────────────────────────────────────────────
     save_to_excel(df_result, df_regime)
+
+    # ── 시나리오 기반 외생변수 생성 ────────────────────────────
+    print("\n" + "=" * 60)
+    print("  [Step 6] 시나리오 기반 외생변수 생성")
+    print("=" * 60)
+    if SCENARIO_CSV_PATH.exists():
+        df_exog, df_labeled = build_scenario_exog(df_regime)
+        save_exog(df_exog, df_labeled)
+    else:
+        print(f"  [!] 시나리오 CSV 없음: {SCENARIO_CSV_PATH}")
+        print("      analysis/scenario_selection.py 를 먼저 실행하세요.")
