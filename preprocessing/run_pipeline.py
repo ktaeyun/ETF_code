@@ -2,7 +2,7 @@
 전처리 통합 파이프라인
 ======================
 dataset/train_ver1/ 의 실제 데이터를 사용하여
-HAR-VKOSPI → Bai-Perron(raw) → Gaussian HMM(SVI) → Gaussian HMM(변동성) 을 순차 실행한다.
+HAR-VKOSPI → Gaussian HMM (전 변수) 을 순차 실행한다.
 
 데이터 출처:
   kp_train.csv  : KOSPI_Volatility (VKOSPI), volume_btc, bitcoin_kr (국내 SVI)
@@ -16,9 +16,16 @@ HAR-VKOSPI → Bai-Perron(raw) → Gaussian HMM(SVI) → Gaussian HMM(변동성)
   Global_RV        ← gap_train["btc_volatility"]   (BTC 일별 실현 변동성)
 
 [구간 분할 설계]
-  Step 3. Bai-Perron   — raw 주별 SVI/Volume 원시값 → 수준 변화 탐지
-  Step 4. HMM(SVI)     — raw 주별 SVI/Volume 원시값 → HMM 상태 구간 포착  [테스트]
-  Step 5. HMM(변동성)  — Global_RV / VKOSPI_resid  → 변동성 regime 분류
+  Step 2. HAR-VKOSPI   — 일별 VKOSPI → 표준화 잔차 추출
+  Step 3. HMM(SVI)     — 주별 SVI/Volume → Gaussian HMM 레짐 분류
+  Step 4. HMM(변동성)  — 일별 Global_RV / VKOSPI_resid → Gaussian HMM 레짐 분류
+
+[로그 변환 설계]
+  global_btc_svi   : log1p  (0~100 bounded, 0 포함 가능)
+  domestic_btc_svi : log1p  (동일)
+  btc_volume_btc   : log1p  (0 거래 주 가능)
+  Global_RV        : log    (양수 보장 실현 변동성, log-normal)
+  VKOSPI_resid     : None   (표준화 잔차, 음수 포함)
 """
 
 from __future__ import annotations
@@ -33,7 +40,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from preprocessing.har_vkospi import run_har_pipeline
-from preprocessing.bai_perron import run_bai_perron_pipeline
 from preprocessing.gaussian_hmm import run_hmm_pipeline, HMMComparison
 
 
@@ -44,14 +50,18 @@ from preprocessing.gaussian_hmm import run_hmm_pipeline, HMMComparison
 DATA_DIR    = _ROOT / "dataset" / "train_ver1"
 RESULTS_DIR = _ROOT / "results" / "preprocessing"
 
-# Bai-Perron 대상 컬럼 (raw 주별 원시값)
-BP_RAW_COLS = ["global_btc_svi", "domestic_btc_svi", "btc_volume_btc"]
+# HMM 대상 컬럼 (주별)
+HMM_SVI_COLS = ["global_btc_svi", "domestic_btc_svi", "btc_volume_btc"]
 
-# 컬럼별 최대 break 수 (int 로 바꾸면 전체 공통 적용)
-BP_MAX_BREAKS: dict[str, int] = {
-    "global_btc_svi":   3,
-    "domestic_btc_svi": 3,
-    "btc_volume_btc":   5,
+# 로그 변환 설정
+HMM_SVI_TRANSFORM: dict[str, str | None] = {
+    "global_btc_svi":   "log1p",
+    "domestic_btc_svi": "log1p",
+    "btc_volume_btc":   "log1p",
+}
+HMM_VOL_TRANSFORM: dict[str, str | None] = {
+    "Global_RV":    "log",
+    "VKOSPI_resid": None,
 }
 
 
@@ -64,8 +74,8 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Returns
     -------
-    df_daily  : pd.DataFrame  (daily, Global_RV 포함)
-    df_weekly : pd.DataFrame  (W-MON 기준, SVI/Volume 원시값)
+    df_daily  : pd.DataFrame  (daily)
+    df_weekly : pd.DataFrame  (W-MON 기준, SVI/Volume)
     """
     kp_df  = pd.read_csv(DATA_DIR / "kp_train.csv",
                           parse_dates=["Date"]).set_index("Date").sort_index()
@@ -103,12 +113,7 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
 # ══════════════════════════════════════════════
 
 def step_har(df_daily: pd.DataFrame, save: bool = True):
-    """HAR 모형 VKOSPI 적합 및 표준화 잔차 추출.
-
-    Returns
-    -------
-    har_result : HARResult
-    """
+    """HAR 모형 VKOSPI 적합 및 표준화 잔차 추출."""
     print("\n" + "═" * 60)
     print("  Step 2: HAR-VKOSPI")
     print("═" * 60)
@@ -127,44 +132,7 @@ def step_har(df_daily: pd.DataFrame, save: bool = True):
 
 
 # ══════════════════════════════════════════════
-# Step 3 — Bai-Perron: raw 주별 데이터
-# ══════════════════════════════════════════════
-
-def step_bai_perron(
-    df_weekly: pd.DataFrame,
-    m_max: "dict[str, int] | int" = BP_MAX_BREAKS,
-    save: bool = True,
-) -> dict:
-    """Bai-Perron 검정을 raw 주별 SVI/Volume 에 적용한다.
-
-    Parameters
-    ----------
-    m_max : dict[str, int] or int
-        컬럼별 최대 break 수. 기본값은 모듈 상단의 BP_MAX_BREAKS.
-        int 를 넘기면 모든 컬럼에 동일 적용.
-
-    Returns
-    -------
-    dict : {컬럼명 → BaiPerronResult}
-    """
-    print("\n" + "═" * 60)
-    print("  Step 3: Bai-Perron (Raw Weekly Series — Level Breaks)")
-    print("═" * 60)
-
-    return run_bai_perron_pipeline(
-        df           = df_weekly,
-        asvi_columns = BP_RAW_COLS,
-        m_max        = m_max,
-        trim         = 0.10,
-        sig_level    = 0.05,
-        hac_bw       = None,
-        plot         = True,
-        save_dir     = str(RESULTS_DIR / "bai_perron") if save else None,
-    )
-
-
-# ══════════════════════════════════════════════
-# Step 4 — Gaussian HMM: 주별 SVI/Volume  [테스트]
+# Step 3 — Gaussian HMM: 주별 SVI/Volume
 # ══════════════════════════════════════════════
 
 def step_hmm_svi(
@@ -173,46 +141,43 @@ def step_hmm_svi(
     B:         int  = 1000,
     save:      bool = True,
 ) -> dict[str, HMMComparison]:
-    """Bai-Perron 대상 3개 주별 시리즈에 Gaussian HMM K=2/3 을 적합한다.
-
-    Bai-Perron 과 동일한 df_weekly 를 입력으로 받아 HMM 기반 상태 구간을 포착한다.
-    Bai-Perron 은 수준 변화(level break)를 탐지하고, HMM 은 잠재 상태(latent regime)
-    를 확률적으로 추정하므로 두 방법의 구간 비교가 가능하다.
+    """주별 SVI/Volume 3개 시리즈에 Gaussian HMM K=2/3 을 적합한다.
 
     Returns
     -------
     dict : {컬럼명 → HMMComparison}
     """
     print("\n" + "═" * 60)
-    print("  Step 4: Gaussian HMM — SVI/Volume Weekly  [테스트]")
+    print("  Step 3: Gaussian HMM — SVI/Volume (Weekly)")
     print("  [global_btc_svi / domestic_btc_svi / btc_volume_btc]")
     print("═" * 60)
 
     save_dir = str(RESULTS_DIR / "hmm_svi") if save else None
     results: dict[str, HMMComparison] = {}
 
-    for col in BP_RAW_COLS:
+    for col in HMM_SVI_COLS:
         if col not in df_weekly.columns:
             print(f"[HMM-SVI] Column not found, skipping: {col}")
             continue
         series      = df_weekly[col].dropna().copy()
         series.name = col
         results[col] = run_hmm_pipeline(
-            series   = series,
-            n_init   = n_init,
-            B        = B,
-            plot     = True,
-            save_dir = save_dir,
+            series    = series,
+            n_init    = n_init,
+            B         = B,
+            plot      = True,
+            save_dir  = save_dir,
+            transform = HMM_SVI_TRANSFORM.get(col),
         )
 
     return results
 
 
 # ══════════════════════════════════════════════
-# Step 5 — Gaussian HMM: 변동성
+# Step 4 — Gaussian HMM: 변동성 (일별)
 # ══════════════════════════════════════════════
 
-def step_hmm(
+def step_hmm_vol(
     df_daily:   pd.DataFrame,
     har_result,
     n_init:     int  = 10,
@@ -226,7 +191,7 @@ def step_hmm(
     dict : {"Global_RV": HMMComparison, "VKOSPI_resid": HMMComparison}
     """
     print("\n" + "═" * 60)
-    print("  Step 5: Gaussian HMM (K=2 vs K=3)")
+    print("  Step 4: Gaussian HMM — Volatility (Daily)")
     print("  [Global_RV  &  VKOSPI_resid]")
     print("═" * 60)
 
@@ -243,11 +208,12 @@ def step_hmm(
     hmm_results = {}
     for series in [global_rv, resid_z]:
         hmm_results[series.name] = run_hmm_pipeline(
-            series   = series,
-            n_init   = n_init,
-            B        = B,
-            plot     = True,
-            save_dir = str(RESULTS_DIR / "gaussian_hmm") if save else None,
+            series    = series,
+            n_init    = n_init,
+            B         = B,
+            plot      = True,
+            save_dir  = str(RESULTS_DIR / "hmm_vol") if save else None,
+            transform = HMM_VOL_TRANSFORM.get(series.name),
         )
     return hmm_results
 
@@ -269,14 +235,13 @@ def main(
       "df_daily"   : pd.DataFrame,
       "df_weekly"  : pd.DataFrame,
       "har_result" : HARResult,
-      "bp"         : dict[str, BaiPerronResult],
-      "hmm_svi"    : dict[str, HMMComparison],   # SVI/Volume HMM [테스트]
-      "hmm"        : dict[str, HMMComparison],   # 변동성 HMM
+      "hmm_svi"    : dict[str, HMMComparison],
+      "hmm_vol"    : dict[str, HMMComparison],
     }
     """
     if save_plots:
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        for sub in ["bai_perron", "hmm_svi", "gaussian_hmm"]:
+        for sub in ["hmm_svi", "hmm_vol"]:
             (RESULTS_DIR / sub).mkdir(parents=True, exist_ok=True)
 
     print("\n" + "═" * 60)
@@ -285,10 +250,9 @@ def main(
     df_daily, df_weekly = load_data()
 
     har_result      = step_har(df_daily, save=save_plots)
-    bp_results      = step_bai_perron(df_weekly, m_max=BP_MAX_BREAKS, save=save_plots)
     hmm_svi_results = step_hmm_svi(df_weekly, n_init=hmm_n_init, B=hmm_B, save=save_plots)
-    hmm_results     = step_hmm(df_daily, har_result,
-                                n_init=hmm_n_init, B=hmm_B, save=save_plots)
+    hmm_vol_results = step_hmm_vol(df_daily, har_result,
+                                    n_init=hmm_n_init, B=hmm_B, save=save_plots)
 
     # ── 최종 요약 ────────────────────────────────────────────
     print("\n" + "═" * 60)
@@ -297,11 +261,6 @@ def main(
     print(f"  HAR R²    : {har_result.r_squared:.4f}")
     print(f"  HAR ADF p : {har_result.adf_pval:.4f}  "
           f"({'Stationary' if har_result.adf_pval < 0.05 else 'Non-Stationary'})")
-
-    print("\n  [Bai-Perron — Raw Weekly]")
-    for col, res in bp_results.items():
-        dates_str = [str(d.date()) for d in res.break_dates]
-        print(f"    {col}: m={res.optimal_m}  breaks={dates_str}")
 
     def _hmm_summary_line(comp):
         k = comp.optimal_K
@@ -316,13 +275,13 @@ def main(
             print(f"      Regime {i}: μ={r.mu[i]:.4f}  σ={r.sigma[i]:.4f}  "
                   f"occ={r.occupancy[i]:.1%}")
 
-    print("\n  [HMM — SVI/Volume Weekly  (테스트)]")
+    print("\n  [Gaussian HMM — SVI/Volume Weekly]")
     for col, comp in hmm_svi_results.items():
         print(f"    {col}:", end="  ")
         _hmm_summary_line(comp)
 
-    print("\n  [Gaussian HMM — 변동성]")
-    for name, comp in hmm_results.items():
+    print("\n  [Gaussian HMM — Volatility Daily]")
+    for name, comp in hmm_vol_results.items():
         print(f"    {name}:", end="  ")
         _hmm_summary_line(comp)
 
@@ -330,9 +289,8 @@ def main(
         "df_daily":   df_daily,
         "df_weekly":  df_weekly,
         "har_result": har_result,
-        "bp":         bp_results,
         "hmm_svi":    hmm_svi_results,
-        "hmm":        hmm_results,
+        "hmm_vol":    hmm_vol_results,
     }
 
 

@@ -585,18 +585,43 @@ def plot_hmm_comparison(
 # ══════════════════════════════════════════════
 
 def run_hmm_pipeline(
-    series:   pd.Series,
-    n_init:   int  = 10,
-    B:        int  = 1000,
-    seed:     int  = 42,
-    plot:     bool = True,
-    save_dir: Optional[str] = None,
+    series:    pd.Series,
+    n_init:    int  = 10,
+    B:         int  = 1000,
+    seed:      int  = 42,
+    plot:      bool = True,
+    save_dir:  Optional[str] = None,
+    transform: Optional[str] = None,   # None | 'log' | 'log1p'
 ) -> HMMComparison:
-    """단일 시계열에 대해 K=2·K=3 HMM 비교 파이프라인 실행."""
+    """단일 시계열에 대해 K=2·K=3 HMM 비교 파이프라인 실행.
+
+    Parameters
+    ----------
+    transform : None | 'log' | 'log1p'
+        None    — 변환 없음 (표준화 잔차 등 이미 정상화된 변수)
+        'log'   — log(y)   : 양수 보장 변수 (Global_RV 등)
+        'log1p' — log(1+y) : 0 포함 가능 양수 변수 (SVI, 거래량 등)
+    """
     from pathlib import Path
 
-    name = series.name or "series"
-    y    = series.dropna().values.astype(float)
+    name    = series.name or "series"
+    s_clean = series.dropna()
+    y       = s_clean.values.astype(float)
+
+    if transform == "log":
+        if np.any(y <= 0):
+            raise ValueError(f"[HMM] log transform: '{name}' has non-positive values")
+        y      = np.log(y)
+        name   = f"log({name})"
+        s_plot = pd.Series(y, index=s_clean.index, name=name)
+    elif transform == "log1p":
+        if np.any(y < 0):
+            raise ValueError(f"[HMM] log1p transform: '{name}' has negative values")
+        y      = np.log1p(y)
+        name   = f"log1p({name})"
+        s_plot = pd.Series(y, index=s_clean.index, name=name)
+    else:
+        s_plot = s_clean
 
     print(f"\n{'═'*58}")
     print(f"  Gaussian HMM Pipeline  |  {name}  (T={len(y)})")
@@ -606,13 +631,14 @@ def run_hmm_pipeline(
     comp.print_summary()
 
     if plot:
-        save_k1 = str(Path(save_dir) / f"hmm_{name}_K1.png")         if save_dir else None
-        save_k2 = str(Path(save_dir) / f"hmm_{name}_K2.png")         if save_dir else None
-        save_k3 = str(Path(save_dir) / f"hmm_{name}_K3.png")         if save_dir else None
-        save_cp = str(Path(save_dir) / f"hmm_{name}_comparison.png") if save_dir else None
-        plot_hmm_result(comp.result_k1, series.dropna(), save_path=save_k1)
-        plot_hmm_result(comp.result_k2, series.dropna(), save_path=save_k2)
-        plot_hmm_result(comp.result_k3, series.dropna(), save_path=save_k3)
+        safe = name.replace("(", "_").replace(")", "").replace(" ", "_")
+        save_k1 = str(Path(save_dir) / f"hmm_{safe}_K1.png")         if save_dir else None
+        save_k2 = str(Path(save_dir) / f"hmm_{safe}_K2.png")         if save_dir else None
+        save_k3 = str(Path(save_dir) / f"hmm_{safe}_K3.png")         if save_dir else None
+        save_cp = str(Path(save_dir) / f"hmm_{safe}_comparison.png") if save_dir else None
+        plot_hmm_result(comp.result_k1, s_plot, save_path=save_k1)
+        plot_hmm_result(comp.result_k2, s_plot, save_path=save_k2)
+        plot_hmm_result(comp.result_k3, s_plot, save_path=save_k3)
         plot_hmm_comparison(comp, save_path=save_cp)
         plt.show()
 
@@ -649,5 +675,5 @@ if __name__ == "__main__":
         name="VKOSPI_resid",
     )
 
-    for series in [global_rv, resid_z]:
-        run_hmm_pipeline(series, n_init=10, B=1000, plot=True, save_dir=None)
+    run_hmm_pipeline(global_rv, n_init=10, B=1000, plot=True, save_dir=None, transform="log")
+    run_hmm_pipeline(resid_z,   n_init=10, B=1000, plot=True, save_dir=None, transform=None)
