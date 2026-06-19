@@ -933,26 +933,45 @@ def run_all_combos(freq_threshold: int = 0) -> dict:
 def run_from_pairs(freq_threshold: int = 1) -> dict:
     """scenario_pair_possible_ambiguity.csv 판정으로 재분류 후 전체 Possible 시나리오 선택.
 
-    - diversity_constraint=None : Possible 조합 전체 선택 (최대화)
+    - freq_threshold=0 : 미관측(joint_frequency=0) Possible 조합 포함
+    - freq_threshold=1 : 실제 관측된 Possible 조합만 (기본값)
     - 한국 특수성 축 매칭 결과를 각 시나리오에 직접 태깅
     """
     print("=" * 60)
     print("  [쌍별 CSV 기반] Possible 시나리오 최대화 선택")
+    freq_label = "관측 + 미관측 포함" if freq_threshold == 0 else f"freq ≥ {freq_threshold}"
+    print(f"  ({freq_label})")
     print("=" * 60)
 
-    # 1. 테이블 로드 & 재분류
+    # 1. 테이블 로드
     df_combo = load_classified_table()
-    df_combo = reclassify_from_pairwise_csv(df_combo)
 
-    # 2. Step 3: 다양성 제약 없이 Possible 전체 선택
-    core_df = step3_core(
-        df_combo,
-        diversity_constraint=None,
-        lift_threshold=0.0,      # lift 기준 제거 (쌍별 CSV 판정이 이미 필터)
-        freq_threshold=freq_threshold,
-    )
+    # 2. 이론적 전체 조합 열거 (미관측 freq=0 포함) + 쌍별 CSV 판정
+    #    enumerate_all_theoretical_combos 내부에서 pairwise CSV 재분류 수행
+    df_all = enumerate_all_theoretical_combos(df_combo)
 
-    # 3. 한국 특수성 축 태깅
+    # 3. Possible 조합만 추출, freq 기준 적용
+    core_df = df_all[
+        (df_all["theoretical_class"] == "Possible") &
+        (df_all["joint_frequency"] >= freq_threshold)
+    ].copy().reset_index(drop=True)
+
+    # Rank 컬럼 삽입 (빈도 내림차순으로 이미 정렬됨)
+    if "Rank" not in core_df.columns:
+        core_df.insert(0, "Rank", range(1, len(core_df) + 1))
+    if "No" in core_df.columns:
+        core_df = core_df.drop(columns=["No"])
+
+    n_obs   = (core_df["joint_frequency"] > 0).sum()
+    n_unobs = (core_df["joint_frequency"] == 0).sum()
+    print(f"\n  선택된 Possible 시나리오: {len(core_df)}개  "
+          f"(관측: {n_obs}개 | 미관측: {n_unobs}개)")
+
+    _print_table(core_df, ["Rank"] + DISPLAY_COLS + [
+        "joint_frequency", "pairwise_lift_mean", "theoretical_class"
+    ])
+
+    # 4. 한국 특수성 축 태깅
     core_df = tag_axis_matches(core_df)
 
     # 4. 결과 출력
@@ -1004,6 +1023,23 @@ def run_from_pairs(freq_threshold: int = 1) -> dict:
 
     print(f"\n  Excel 저장: {out_path}")
     print(f"  전체 Possible: {len(core_df)}개  |  축 매칭: {len(axis_matched)}개")
+
+    # 6. final_scenarios_latest.csv 저장 (시뮬레이터 호환 형식)
+    final_df = core_df.copy()
+    final_df.insert(0, "Scenario_ID", ["P" + str(r).zfill(2) for r in final_df["Rank"]])
+    final_df.insert(1, "Type", "Pairs")
+    final_df.insert(2, "Axis", final_df.get("matched_axes", ""))
+    csv_cols = ["Scenario_ID", "Type", "Axis"] + DISPLAY_COLS + [
+        "joint_frequency", "pairwise_lift_mean", "theoretical_class", "combo_label",
+    ]
+    csv_cols = [c for c in csv_cols if c in final_df.columns]
+
+    # 이전 CSV 백업 후 덮어쓰기
+    prev_csv = SCENARIO_DIR / "final_scenarios_latest.csv"
+    if prev_csv.exists():
+        prev_csv.rename(SCENARIO_DIR / "final_scenarios_prev.csv")
+    final_df[csv_cols].to_csv(prev_csv, index=False)
+    print(f"  CSV 저장 (시뮬레이터용): {prev_csv}")
 
     return {
         "possible_all":  core_df,

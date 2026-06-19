@@ -18,17 +18,26 @@ def _to_array(x):
     return np.asarray(x).flatten()
 
 
-def plot_nav_paths(actual_nav, simulated_nav, save_path=None, monte_carlo_nav_paths=None):
+_MODULE_META = {
+    "nav":      {"label": "NAV",      "model": "ARIMA-GARCH-t",     "ylabel": "NAV"},
+    "gap":      {"label": "GAP",      "model": "OU with exog",       "ylabel": "ETF 프리미엄"},
+    "kp":       {"label": "KP",       "model": "Threshold-OU",       "ylabel": "김치 프리미엄"},
+    "combined": {"label": "결합",     "model": "NAV×(1+GAP)",        "ylabel": "ETF 가격"},
+}
+
+
+def plot_nav_paths(actual_nav, simulated_nav, save_path=None, monte_carlo_nav_paths=None, module="nav"):
     """
-    NAV 경로 비교 (실제 vs 시뮬레이션, 몬테카를로 팬)
+    경로 비교 (실제 vs 시뮬레이션, 몬테카를로 팬)
     """
+    meta = _MODULE_META.get(module, _MODULE_META["nav"])
     actual_nav = _to_array(actual_nav)
     simulated_nav = _to_array(simulated_nav)
     T = len(actual_nav)
     dates = np.arange(T)
 
     fig, ax = plt.subplots(figsize=(14, 7))
-    ax.plot(dates, actual_nav, label='실제 NAV', linewidth=2.5, alpha=0.9, color='black', zorder=10)
+    ax.plot(dates, actual_nav, label=f'실제 {meta["label"]}', linewidth=2.5, alpha=0.9, color='black', zorder=10)
 
     if monte_carlo_nav_paths is not None and len(monte_carlo_nav_paths) > 0:
         mc = np.asarray(monte_carlo_nav_paths)
@@ -48,23 +57,25 @@ def plot_nav_paths(actual_nav, simulated_nav, save_path=None, monte_carlo_nav_pa
         ax.plot(dates, simulated_nav, label='대표 경로(중앙값)', linewidth=1.5, alpha=0.7, color='red', linestyle=':', zorder=6)
 
     ax.set_xlabel('일수', fontsize=12)
-    ax.set_ylabel('NAV', fontsize=12)
-    ax.set_title('NAV 경로 비교 (ARIMAX-GARCH-t 몬테카를로)', fontsize=14, fontweight='bold')
+    ax.set_ylabel(meta["ylabel"], fontsize=12)
+    ax.set_title(f'{meta["label"]} 경로 비교 ({meta["model"]} 몬테카를로)', fontsize=14, fontweight='bold')
     ax.legend(fontsize=10, loc='best')
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  - NAV 경로 저장: {save_path}")
+        print(f"  - {meta['label']} 경로 저장: {save_path}")
     plt.close()
 
 
-def plot_returns_distribution(actual_returns, simulated_returns, save_path=None, monte_carlo_returns_paths=None):
+def plot_returns_distribution(actual_returns, simulated_returns, save_path=None, monte_carlo_returns_paths=None, module="nav"):
     """
-    수익률 분포 비교 (히스토그램 + Q-Q)
+    변화량 분포 비교 (히스토그램 + Q-Q)
     """
     from scipy import stats
+    meta = _MODULE_META.get(module, _MODULE_META["nav"])
     actual_values = _to_array(actual_returns)
+    xlabel = "Log Return" if module == "nav" else f"{meta['label']} 변화량"
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     ax1 = axes[0]
@@ -83,9 +94,9 @@ def plot_returns_distribution(actual_returns, simulated_returns, save_path=None,
     elif simulated_returns is not None:
         ax1.hist(_to_array(simulated_returns), bins=50, alpha=0.6, label='시뮬', density=True, color='blue')
 
-    ax1.set_xlabel('Log Return', fontsize=12)
+    ax1.set_xlabel(xlabel, fontsize=12)
     ax1.set_ylabel('밀도', fontsize=12)
-    ax1.set_title('수익률 분포 비교', fontsize=12, fontweight='bold')
+    ax1.set_title(f'{meta["label"]} 분포 비교', fontsize=12, fontweight='bold')
     ax1.legend(fontsize=10)
     ax1.grid(True, alpha=0.3)
 
@@ -111,37 +122,39 @@ def plot_returns_distribution(actual_returns, simulated_returns, save_path=None,
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  - 수익률 분포 저장: {save_path}")
+        print(f"  - {meta['label']} 분포 저장: {save_path}")
     plt.close()
 
 
-def plot_returns_timeseries(actual_returns, simulated_returns, save_path=None):
+def plot_returns_timeseries(actual_returns, simulated_returns, save_path=None, module="nav"):
     """
-    수익률 시계열 비교 (실제 / 시뮬레이션)
+    변화량 시계열 비교 (실제 / 시뮬레이션)
     """
+    meta = _MODULE_META.get(module, _MODULE_META["nav"])
     actual_values = _to_array(actual_returns)
     simulated_values = _to_array(simulated_returns) if simulated_returns is not None else None
     T = len(actual_values)
     dates = np.arange(T)
+    ylabel = "Log Return" if module == "nav" else f"{meta['label']} 변화량"
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
     axes[0].plot(dates, actual_values, linewidth=0.8, alpha=0.7, color='blue')
     axes[0].axhline(y=0, color='black', linestyle='--', linewidth=0.5)
-    axes[0].set_ylabel('Log Return', fontsize=12)
-    axes[0].set_title('실제 수익률 시계열', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel(ylabel, fontsize=12)
+    axes[0].set_title(f'실제 {meta["label"]} 변화량 시계열', fontsize=12, fontweight='bold')
     axes[0].grid(True, alpha=0.3)
 
     if simulated_values is not None and len(simulated_values) == T:
         axes[1].plot(dates, simulated_values, linewidth=0.8, alpha=0.7, color='red')
     axes[1].axhline(y=0, color='black', linestyle='--', linewidth=0.5)
     axes[1].set_xlabel('일수', fontsize=12)
-    axes[1].set_ylabel('Log Return', fontsize=12)
-    axes[1].set_title('시뮬레이션 수익률 시계열 (대표 경로)', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel(ylabel, fontsize=12)
+    axes[1].set_title(f'시뮬레이션 {meta["label"]} 변화량 시계열 (대표 경로)', fontsize=12, fontweight='bold')
     axes[1].grid(True, alpha=0.3)
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"  - 수익률 시계열 저장: {save_path}")
+        print(f"  - {meta['label']} 변화량 시계열 저장: {save_path}")
     plt.close()
 
 
@@ -153,10 +166,11 @@ def create_all_visualizations(
     output_dir,
     monte_carlo_nav_paths=None,
     monte_carlo_returns_paths=None,
+    module="nav",
 ):
     """
-    compare와 동일한 형식: NAV 경로, 수익률 분포, 수익률 시계열 저장.
-    Weighted Multi-band Capture Rate(WMCR) 등 검증 지표는 main에서 별도 계산.
+    경로, 분포, 시계열 플롯 저장.
+    module: "nav" | "gap" | "kp" | "combined"
     """
     import os
     output_dir = os.path.abspath(output_dir)
@@ -166,13 +180,16 @@ def create_all_visualizations(
         actual_nav, simulated_nav,
         save_path=os.path.join(output_dir, 'nav_paths.png'),
         monte_carlo_nav_paths=monte_carlo_nav_paths,
+        module=module,
     )
     plot_returns_distribution(
         actual_returns, simulated_returns,
         save_path=os.path.join(output_dir, 'returns_distribution.png'),
         monte_carlo_returns_paths=monte_carlo_returns_paths,
+        module=module,
     )
     plot_returns_timeseries(
         actual_returns, simulated_returns,
         save_path=os.path.join(output_dir, 'returns_timeseries.png'),
+        module=module,
     )

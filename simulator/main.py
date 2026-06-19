@@ -77,7 +77,7 @@ def main():
     print("\n[1단계] 데이터 로드")
     df = load_nav_exog_and_returns(base_dir=base_dir)
     log_returns = df["Log Return"]
-    exog = df[EXOG_COLS]
+    exog = None
     T = len(log_returns)
     actual_returns = np.asarray(log_returns).flatten()
     S0 = args.S0
@@ -209,6 +209,7 @@ def main():
         output_dir=str(out_dir / "plots" / "nav"),
         monte_carlo_nav_paths=monte_carlo_nav_array,
         monte_carlo_returns_paths=monte_carlo_returns_array,
+        module="nav",
     )
 
     # ============================================================================
@@ -329,6 +330,7 @@ def main():
         output_dir=str(out_dir / "plots" / "gap"),
         monte_carlo_nav_paths=monte_carlo_gap_array,
         monte_carlo_returns_paths=simulated_gap_changes_array,
+        module="gap",
     )
 
     # ============================================================================
@@ -344,15 +346,17 @@ def main():
     kp_series = df_kp["Kimchi Premium"]
     volume_btc_series = df_kp["volume_btc"]
     kospi_vol_series = df_kp["KOSPI_Volatility"]
+    bitcoin_kr_series = df_kp["bitcoin_kr"]
     T_kp = len(kp_series)
     actual_kp = np.asarray(kp_series).flatten()
-    
+
     # KP-2) Threshold-OU 모델 적합
-    print("\n[KP-2단계] Threshold-OU 모델 적합 (외생변수: volume_btc, KOSPI_Volatility)")
+    print("\n[KP-2단계] Threshold-OU 모델 적합 (외생변수: volume_btc, KOSPI_Volatility, bitcoin_kr)")
     kp_sim = fit_kp_threshold_ou(
         kp_series=kp_series,
         volume_btc=volume_btc_series,
         kospi_vol=kospi_vol_series,
+        bitcoin_kr=bitcoin_kr_series,
         threshold=None,  # 자동 선택
         clip=3.0,
         regularization=0.01
@@ -367,7 +371,8 @@ def main():
         print(f"      σ0_{r}: {kp_sim.regime_params[r]['sigma0']:.6f}")
         print(f"      δ1_{r} (volume_btc): {kp_sim.delta1_regime[r]:.6f}")
         print(f"      δ2_{r} (KOSPI_Vol): {kp_sim.delta2_regime[r]:.6f}")
-    
+        print(f"      δ3_{r} (bitcoin_kr): {kp_sim.delta3_regime[r]:.6f}")
+
     # KP-3) 몬테카를로 시뮬레이션
     print(f"\n[KP-3단계] 몬테카를로 시뮬레이션 (n={args.n_simulations}, T={T_kp})")
     all_kp = []
@@ -378,6 +383,7 @@ def main():
             kp0=kp0,
             volume_btc_future=volume_btc_series.values,
             kospi_vol_future=kospi_vol_series.values,
+            bitcoin_kr_future=bitcoin_kr_series.values,
             seed=args.seed + 20000 + i
         )
         all_kp.append(np.asarray(sim_kp).flatten())
@@ -455,6 +461,7 @@ def main():
         output_dir=str(out_dir / "plots" / "kp"),
         monte_carlo_nav_paths=monte_carlo_kp_array,
         monte_carlo_returns_paths=simulated_kp_changes_array,
+        module="kp",
     )
 
     # ============================================================================
@@ -586,6 +593,7 @@ def main():
         output_dir=str(out_dir / "plots" / "combined"),
         monte_carlo_nav_paths=monte_carlo_combined_array,
         monte_carlo_returns_paths=simulated_combined_returns_array,
+        module="combined",
     )
 
     # ============================================================================
@@ -703,6 +711,7 @@ def main():
                         "sigma0": kp_sim.regime_params[r]['sigma0'],
                         "delta1": kp_sim.delta1_regime[r],
                         "delta2": kp_sim.delta2_regime[r],
+                        "delta3": kp_sim.delta3_regime[r],
                     }
                     for r in [0, 1, 2]
                 },

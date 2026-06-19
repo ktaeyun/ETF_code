@@ -19,17 +19,17 @@ EXOG_COLS = ["Hash Rate (TH/s)", "Unique Addresses"]
 
 def fit_arimax_garch_t(
     log_returns: pd.Series,
-    exog: pd.DataFrame,
+    exog: pd.DataFrame = None,
     ar_order: tuple = (1, 0, 1),
     garch_p: int = 1,
     garch_q: int = 1,
 ) -> "NavArimaGarchTSimulator":
     """
-    ARIMAX-GARCH-t 적합: Log Return ~ ARIMA + Hash Rate + Unique Addresses, 잔차 ~ GARCH(1,1)-t.
+    ARIMA-GARCH-t 적합. exog=None이면 순수 ARIMA(p,d,q)-GARCH-t.
 
     Args:
         log_returns: 종속변수 Log Return (y_variables)
-        exog: 독립변수 DataFrame, 컬럼 EXOG_COLS (Hash Rate, Unique Addresses)
+        exog: 독립변수 DataFrame (None이면 외생변수 미사용)
         ar_order: ARIMA (p, d, q)
         garch_p, garch_q: GARCH 차수
 
@@ -37,14 +37,19 @@ def fit_arimax_garch_t(
         NavArimaGarchTSimulator 인스턴스
     """
     y = np.asarray(log_returns, dtype=float).flatten()
-    X = exog[EXOG_COLS].values.astype(float)
-    if len(y) != len(X):
-        raise ValueError("log_returns와 exog 길이 불일치")
     if len(y) < 30:
         raise ValueError("최소 30개 관측 필요")
 
-    # 1) ARIMAX 적합
-    arima_model = ARIMA(y, exog=X, order=ar_order)
+    if exog is not None:
+        X = exog[EXOG_COLS].values.astype(float)
+        if len(y) != len(X):
+            raise ValueError("log_returns와 exog 길이 불일치")
+        arima_model = ARIMA(y, exog=X, order=ar_order)
+    else:
+        X = None
+        arima_model = ARIMA(y, order=ar_order)
+
+    # 1) ARIMA(X) 적합
     arima_fitted = arima_model.fit()
     resid = np.asarray(arima_fitted.resid).flatten()
 
@@ -63,10 +68,10 @@ def fit_arimax_garch_t(
     return NavArimaGarchTSimulator(
         arima_fitted=arima_fitted,
         garch_fitted=garch_fitted,
-        exog_cols=EXOG_COLS,
+        exog_cols=EXOG_COLS if X is not None else [],
         last_returns=y[-k:],
         last_resid=resid[-k:],
-        last_exog=X[-1:],
+        last_exog=X[-1:] if X is not None else None,
         resid_scale=0.01,
     )
 

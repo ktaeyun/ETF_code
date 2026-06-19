@@ -82,7 +82,7 @@ def load_gap_exog(
     train_dir = Path(base_dir) / "dataset" / TRAIN_DIR_NAME
     raw_dir = Path(base_dir) / "dataset" / RAW_DIR_NAME
     if gap_path is None:
-        gap_path = train_dir / "gap_train.csv"
+        gap_path = train_dir / "gap_train_main.csv"
     if y_path is None:
         y_path = raw_dir / "y_variables.csv"
     gap_path = Path(gap_path)
@@ -130,7 +130,7 @@ def load_kp_exog(
     train_dir = Path(base_dir) / "dataset" / TRAIN_DIR_NAME
     raw_dir = Path(base_dir) / "dataset" / RAW_DIR_NAME
     if kp_path is None:
-        kp_path = train_dir / "kp_train.csv"
+        kp_path = train_dir / "kp_train_main.csv"
     if y_path is None:
         y_path = raw_dir / "y_variables.csv"
     kp_path = Path(kp_path)
@@ -141,8 +141,8 @@ def load_kp_exog(
     kp_df["Date"] = pd.to_datetime(kp_df["Date"])
     y_df["Date"] = pd.to_datetime(y_df["Date"])
 
-    # 독립변수: volume_btc + KOSPI_Volatility
-    exog_cols = ["volume_btc", "KOSPI_Volatility"]
+    # 독립변수: volume_btc + KOSPI_Volatility + bitcoin_kr
+    exog_cols = ["volume_btc", "KOSPI_Volatility", "bitcoin_kr"]
     for c in exog_cols:
         if c not in kp_df.columns:
             raise ValueError(f"kp_variables에 컬럼 없음: {c}")
