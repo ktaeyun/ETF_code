@@ -420,6 +420,8 @@ def main():
     parser.add_argument("--no-plots",     action="store_true")
     parser.add_argument("--scenarios",    type=str, default=None,
                         help="실행할 시나리오 ID 목록 (쉼표 구분, 예: P01,P03)")
+    parser.add_argument("--force-refit",  action="store_true",
+                        help="HMM 캐시 무시하고 재실행")
     args = parser.parse_args()
 
     out_base = Path(args.out_dir)
@@ -429,7 +431,8 @@ def main():
     print("=" * 60)
     print("  [Step 1] 전처리 파이프라인 실행")
     print("=" * 60)
-    pipeline_out = run_pipeline(hmm_n_init=10, hmm_B=1000, save_plots=False)
+    pipeline_out = run_pipeline(hmm_n_init=10, hmm_B=1000, save_plots=False,
+                                force_refit=args.force_refit)
     hmm_results  = from_pipeline_results(pipeline_out)
 
     # ── Step 2: 시나리오 로드 ──────────────────────────────────

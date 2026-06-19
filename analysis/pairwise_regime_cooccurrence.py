@@ -26,7 +26,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from preprocessing.run_pipeline import load_data, step_har, step_hmm, step_hmm_svi
+from preprocessing.run_pipeline import load_data, step_har, step_hmm_vol, step_hmm_svi
 
 
 # ══════════════════════════════════════════════════════════════
@@ -100,7 +100,7 @@ def build_regime_df(
     print("\n" + "=" * 60)
     print("  [Step 4] HMM — 변동성 (일별)")
     print("=" * 60)
-    hmm_vol = step_hmm(df_daily, har_result, n_init=n_init, B=B, save=False)
+    hmm_vol = step_hmm_vol(df_daily, har_result, n_init=n_init, B=B, save=False)
 
     # 일별 인덱스
     daily_idx = df_daily.index   # df_daily는 dropna() 완료

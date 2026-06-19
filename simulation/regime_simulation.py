@@ -949,12 +949,12 @@ if __name__ == "__main__":
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
 
-    from preprocessing.run_pipeline import load_data, step_har, step_hmm
+    from preprocessing.run_pipeline import load_data, step_har, step_hmm_vol
 
     # ── 데이터 로드 및 HMM 레짐 레이블 추출 ──────────────────
     df_daily, _ = load_data()
     har_result  = step_har(df_daily, save=False)
-    hmm_results = step_hmm(df_daily, har_result, n_init=5, B=200, save=False)
+    hmm_results = step_hmm_vol(df_daily, har_result, n_init=5, B=200, save=False)
 
     # Global_RV HMM → GAP 레짐 레이블
     comp_rv   = hmm_results["Global_RV"]
