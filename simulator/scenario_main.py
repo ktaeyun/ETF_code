@@ -48,6 +48,8 @@ from preprocessing.run_pipeline import main as run_pipeline
 from preprocessing.scenario_generator import (
     from_pipeline_results,
     generate_scenario_series,
+    load_hmm_results_cache,
+    save_hmm_results_cache,
     scenarios_from_csv,
 )
 from simulator.data_loader import load_gap_exog, load_kp_exog
@@ -144,9 +146,9 @@ def run_single_scenario(
         if verbose:
             print(*args)
 
-    _pr(f"\n{'═'*60}")
+    _pr(f"\n{'='*60}")
     _pr(f"  시나리오: {scenario_id}")
-    _pr(f"{'═'*60}")
+    _pr(f"{'='*60}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     if save_plots:
@@ -364,6 +366,383 @@ def run_single_scenario(
 
 
 # ══════════════════════════════════════════════════════════════
+# Base 결과 로드 및 비교
+# ══════════════════════════════════════════════════════════════
+
+_BASE_DIR     = _ROOT / "results" / "simulator"
+_BASE_CACHE   = _BASE_DIR / "cache" / "sim_arrays.npz"
+
+
+def load_base_mc_arrays() -> dict | None:
+    """Base MC 배열 로드 (results/simulator/cache/sim_arrays.npz).
+
+    Keys: mc_nav, mc_nav_ret, mc_gap, mc_kp
+    """
+    if not _BASE_CACHE.exists():
+        return None
+    arrs = dict(np.load(str(_BASE_CACHE)))
+    print(f"  [Base MC] 캐시 로드: {_BASE_CACHE.name}")
+    return arrs
+
+
+def compute_risk_metrics(mc_array: np.ndarray, actual: np.ndarray,
+                         label: str, alpha: float = 0.05) -> dict:
+    """가격경로 MC 배열에서 리스크 지표 산출.
+
+    Parameters
+    ----------
+    mc_array : (N, T) - N개 경로, T 시점
+    actual   : (T,)  - 실제 관측값
+    alpha    : VaR/CVaR 신뢰수준 (0.05 = 95%)
+    """
+    N, T = mc_array.shape
+
+    # 종단 분포 (terminal distribution)
+    terminal = mc_array[:, -1]
+
+    # 경로별 변화량 (수익률)
+    returns  = np.diff(mc_array, axis=1)          # (N, T-1)
+
+    # ── 분포 지표 ──────────────────────────────────────────
+    var_95   = float(np.percentile(terminal, alpha * 100))
+    cvar_95  = float(terminal[terminal <= var_95].mean()) if (terminal <= var_95).any() else var_95
+    var_99   = float(np.percentile(terminal, 1.0))
+    cvar_99  = float(terminal[terminal <= var_99].mean()) if (terminal <= var_99).any() else var_99
+
+    # ── 경로 지표 ──────────────────────────────────────────
+    # 최대 낙폭(Max Drawdown): 각 경로의 peak-to-trough
+    cummax   = np.maximum.accumulate(mc_array, axis=1)
+    drawdowns = (mc_array - cummax) / (np.abs(cummax) + 1e-12)
+    max_dd   = float(drawdowns.min(axis=1).mean())           # 평균 MDD
+
+    # 변동성 (경로별 변화량의 표준편차 평균)
+    vol_paths = returns.std(axis=1)
+    vol_mean  = float(vol_paths.mean())
+
+    # 실제값과의 median 괴리
+    median_path = np.median(mc_array, axis=0)
+    mae_vs_actual = float(np.mean(np.abs(median_path - actual[:T])))
+
+    # 분포 형태
+    from scipy import stats as sp_stats
+    skew = float(sp_stats.skew(terminal))
+    kurt = float(sp_stats.kurtosis(terminal))
+
+    # 5/25/50/75/95th 분위 밴드
+    p5,  p25, p50, p75, p95 = [
+        float(np.percentile(terminal, q)) for q in [5, 25, 50, 75, 95]
+    ]
+
+    return {
+        "label":       label,
+        "VaR_95":      var_95,
+        "CVaR_95":     cvar_95,
+        "VaR_99":      var_99,
+        "CVaR_99":     cvar_99,
+        "Max_DD_mean": max_dd,
+        "Volatility":  vol_mean,
+        "MAE_actual":  mae_vs_actual,
+        "Skewness":    skew,
+        "Kurtosis":    kurt,
+        "p5":  p5,  "p25": p25, "p50": p50, "p75": p75, "p95": p95,
+    }
+
+
+def _build_korean_etf_paths(mc_nav: np.ndarray, mc_gap: np.ndarray,
+                             mc_kp: np.ndarray, anchor: float = 10000.0) -> np.ndarray:
+    """NAV*(1+GAP)*(1+KP) 결합 경로 생성 후 anchor(원)로 정규화.
+
+    N(경로 수)과 T(시간) 모두 최솟값으로 정렬.
+    """
+    min_N = min(mc_nav.shape[0], mc_gap.shape[0], mc_kp.shape[0])
+    min_T = min(mc_nav.shape[1], mc_gap.shape[1], mc_kp.shape[1])
+    raw = (mc_nav[:min_N, :min_T]
+           * (1 + mc_gap[:min_N, :min_T])
+           * (1 + mc_kp[:min_N, :min_T]))
+    init = raw[:, 0:1]
+    init = np.where(init == 0, 1.0, init)
+    return raw * (anchor / init)
+
+
+def plot_price_path_comparison(
+    base_mc:     dict,
+    all_results: dict,
+    out_dir:     Path,
+    anchor:      float = 10000.0,
+) -> None:
+    """Base vs 시나리오: 결합 가격경로(NAV*(1+GAP)*(1+KP)) Fan Chart + 리스크 지표."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  [!] matplotlib 없음 -- 플롯 생략")
+        return
+
+    mc_nav = base_mc.get("mc_nav")
+    mc_gap = base_mc.get("mc_gap")
+    mc_kp  = base_mc.get("mc_kp")
+    if mc_nav is None or mc_gap is None or mc_kp is None:
+        print("  [!] Base MC 배열 불완전 -- 플롯 생략")
+        return
+
+    # ── 실제 가격 로드 ────────────────────────────────────────
+    etf_csv = _BASE_DIR / "korean_etf_price.csv"
+    actual_etf = None
+    if etf_csv.exists():
+        df_etf = pd.read_csv(etf_csv)
+        actual_etf = df_etf["actual_etf_krw"].values
+
+    # ── Base 결합 경로 ────────────────────────────────────────
+    base_combined = _build_korean_etf_paths(mc_nav, mc_gap, mc_kp, anchor)  # (N, T)
+
+    n_sc   = len(all_results)
+    COLORS = ["#d6604d", "#4dac26", "#762a83", "#e66101"]
+
+    fig, axes = plt.subplots(n_sc + 1, 2, figsize=(14, 4 * (n_sc + 1)))
+    if n_sc == 0:
+        axes = axes.reshape(1, 2)
+
+    def _fan_ax(ax, mc, label, color, actual=None):
+        x   = np.arange(mc.shape[1])
+        p5  = np.percentile(mc, 5,  axis=0)
+        p25 = np.percentile(mc, 25, axis=0)
+        p50 = np.median(mc, axis=0)
+        p75 = np.percentile(mc, 75, axis=0)
+        p95 = np.percentile(mc, 95, axis=0)
+        ax.fill_between(x, p5,  p95, alpha=0.12, color=color, label="5-95%")
+        ax.fill_between(x, p25, p75, alpha=0.28, color=color, label="25-75%")
+        ax.plot(x, p50, color=color, lw=1.8, label=f"{label} median")
+        if actual is not None:
+            ax.plot(x[:len(actual)], actual[:len(x)],
+                    color="#111111", lw=1.3, label="Actual", zorder=5)
+        ax.set_ylabel("ETF Price (KRW)", fontsize=8)
+        ax.legend(fontsize=7)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda v, _: f"{v:,.0f}")
+        )
+
+    # ── 행 0: Base Fan Chart + Terminal 분포 ─────────────────
+    _fan_ax(axes[0, 0], base_combined, "Base", "#2166ac", actual_etf)
+    axes[0, 0].set_title("Base -- ETF 가격경로 Fan Chart (KRW)", fontsize=9)
+
+    ax_hist = axes[0, 1]
+    ax_hist.hist(base_combined[:, -1], bins=50, density=True,
+                 color="#2166ac", alpha=0.7, label="Base terminal")
+    for q, ls in [(5, "--"), (50, "-"), (95, ":")]:
+        v = np.percentile(base_combined[:, -1], q)
+        ax_hist.axvline(v, color="#2166ac", lw=1.5, linestyle=ls,
+                        label=f"p{q}={v:,.0f}")
+    ax_hist.set_title("Base -- Terminal Price 분포", fontsize=9)
+    ax_hist.set_xlabel("ETF Price (KRW)", fontsize=8)
+    ax_hist.legend(fontsize=7)
+    ax_hist.grid(True, linestyle="--", alpha=0.4)
+    ax_hist.xaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f"{v:,.0f}")
+    )
+
+    # ── 행 1~: 시나리오 ──────────────────────────────────────
+    risk_rows = []
+    for row_i, (sid, res) in enumerate(all_results.items(), 1):
+        color = COLORS[(row_i - 1) % len(COLORS)]
+
+        # 시나리오 결합 경로: Base NAV + Scenario GAP/KP
+        sc_combined = _build_korean_etf_paths(
+            mc_nav, res["mc_gap"], res["mc_kp"], anchor
+        )
+        min_T = sc_combined.shape[1]
+
+        # Fan Chart: Base median + Scenario band 겹쳐 표시
+        ax = axes[row_i, 0]
+        _fan_ax(ax, sc_combined, sid, color, actual_etf)
+        p50_base = np.median(base_combined[:, :min_T], axis=0)
+        ax.plot(np.arange(min_T), p50_base,
+                color="#2166ac", lw=1.2, linestyle=":", label="Base median", alpha=0.8)
+        ax.set_title(f"{sid} vs Base -- ETF 가격경로 Fan Chart (KRW)", fontsize=9)
+        ax.legend(fontsize=7)
+
+        # Terminal 분포 비교
+        ax_h = axes[row_i, 1]
+        t_base = base_combined[:, -1]
+        t_sc   = sc_combined[:, -1]
+        ax_h.hist(t_base, bins=50, density=True, color="#2166ac", alpha=0.5, label="Base")
+        ax_h.hist(t_sc,   bins=50, density=True, color=color,     alpha=0.5, label=sid)
+        for t_arr, col in [(t_base, "#2166ac"), (t_sc, color)]:
+            ax_h.axvline(np.percentile(t_arr, 5),  color=col, lw=1.5, linestyle="--")
+            ax_h.axvline(np.percentile(t_arr, 50), color=col, lw=1.2, linestyle="-")
+        ax_h.set_title(f"{sid} vs Base -- Terminal Price 분포", fontsize=9)
+        ax_h.set_xlabel("ETF Price (KRW)", fontsize=8)
+        ax_h.legend(fontsize=7)
+        ax_h.grid(True, linestyle="--", alpha=0.4)
+        ax_h.xaxis.set_major_formatter(
+            plt.FuncFormatter(lambda v, _: f"{v:,.0f}")
+        )
+
+        # 리스크 지표
+        act_dummy = np.full(min_T, anchor)  # 실제 가격이 없으면 anchor 기준
+        if actual_etf is not None:
+            act_dummy = actual_etf
+        risk_rows.append({"Scenario": "Base",
+                          **compute_risk_metrics(base_combined, act_dummy, "Base")})
+        risk_rows.append({"Scenario": sid,
+                          **compute_risk_metrics(sc_combined, act_dummy, sid)})
+
+    fig.suptitle("Base vs Scenario: Korean ETF 결합 가격경로 비교\n"
+                 "(NAV * (1+GAP) * (1+KP), 기준 10,000 KRW)",
+                 fontsize=11, fontweight="bold")
+    out_path = out_dir / "korean_etf_price_comparison.png"
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  ETF 가격경로 비교 플롯: {out_path}")
+
+    # ── 리스크 지표 테이블 ────────────────────────────────────
+    if risk_rows:
+        risk_df = (pd.DataFrame(risk_rows)
+                   .drop_duplicates(subset=["Scenario"])
+                   .reset_index(drop=True))
+        disp_cols = ["Scenario", "VaR_95", "CVaR_95", "VaR_99", "CVaR_99",
+                     "Max_DD_mean", "Volatility", "Skewness", "Kurtosis",
+                     "p5", "p50", "p95"]
+        risk_df = risk_df[[c for c in disp_cols if c in risk_df.columns]]
+        risk_df[risk_df.select_dtypes(float).columns] = \
+            risk_df.select_dtypes(float).round(2)
+
+        risk_path = out_dir / "korean_etf_risk_metrics.csv"
+        risk_df.to_csv(risk_path, index=False, encoding="utf-8-sig")
+
+        print("\n  [리스크 지표 비교]")
+        print(risk_df.to_string(index=False))
+        print(f"\n  리스크 지표 저장: {risk_path}")
+
+
+def load_base_results() -> dict | None:
+    """results/simulator/ 에서 base 시뮬레이션 결과 로드.
+
+    Returns None if base results don't exist.
+    """
+    val_path = _BASE_DIR / "validation_results.json"
+    gap_path = _BASE_DIR / "gap_simulation_results.csv"
+    kp_path  = _BASE_DIR / "kp_simulation_results.csv"
+
+    if not val_path.exists():
+        return None
+
+    with open(val_path, encoding="utf-8") as f:
+        val = json.load(f)
+
+    result = {"validation": val}
+    if gap_path.exists():
+        result["gap_df"] = pd.read_csv(gap_path)
+    if kp_path.exists():
+        result["kp_df"] = pd.read_csv(kp_path)
+    return result
+
+
+def _base_row(base: dict) -> dict:
+    """base 결과에서 비교표 행 생성."""
+    v   = base["validation"]
+    gp  = v.get("gap", {})
+    kp  = v.get("kp", {})
+    ou  = gp.get("ou_params", {})
+    kpp = kp.get("threshold_ou_params", {})
+    gm  = gp.get("validation_metrics", {})
+    km  = kp.get("validation_metrics", {})
+    gs  = gp.get("statistical_tests", {})
+    ks  = kp.get("statistical_tests", {})
+    gw  = gp.get("wmcr_test", {})
+    kw  = kp.get("wmcr_test", {})
+
+    return {
+        "Scenario_ID":   "Base",
+        "gap_kappa":     ou.get("kappa"),
+        "gap_mu":        ou.get("mu"),
+        "gap_sigma0":    ou.get("sigma0"),
+        "gap_delta1_SI": ou.get("delta1"),
+        "gap_delta2_VIX":ou.get("delta2"),
+        "gap_wmcr_price":gm.get("wmcr_price"),
+        "gap_dtw_price": gm.get("dtw_price"),
+        "gap_pmc":       gm.get("pmc"),
+        "gap_pit_ks_p":  gs.get("pit_ks", {}).get("ks_pvalue"),
+        "gap_wmcr_pass": gw.get("all_acceptable"),
+        "kp_threshold":  kpp.get("threshold"),
+        "kp_kappa_r0":   kpp.get("regime_params", {}).get("0", {}).get("kappa"),
+        "kp_kappa_r1":   kpp.get("regime_params", {}).get("1", {}).get("kappa"),
+        "kp_kappa_r2":   kpp.get("regime_params", {}).get("2", {}).get("kappa"),
+        "kp_wmcr_price": km.get("wmcr_price"),
+        "kp_dtw_price":  km.get("dtw_price"),
+        "kp_pmc":        km.get("pmc"),
+        "kp_pit_ks_p":   ks.get("pit_ks", {}).get("ks_pvalue"),
+        "kp_wmcr_pass":  kw.get("all_acceptable"),
+    }
+
+
+def plot_base_vs_scenarios(
+    base:        dict,
+    all_results: dict,
+    out_dir:     Path,
+) -> None:
+    """Base와 시나리오별 GAP / KP 시뮬레이션 비교 시각화."""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+    except ImportError:
+        print("  [!] matplotlib 없음 — 비교 플롯 생략")
+        return
+
+    n_sc = len(all_results)
+    fig = plt.figure(figsize=(14, 5 * (n_sc + 1)))
+    gs  = gridspec.GridSpec(n_sc + 1, 2, figure=fig, hspace=0.45, wspace=0.3)
+
+    def _plot_one(ax, actual, base_sim, sc_sim, title, ylabel):
+        T = len(actual)
+        x = np.arange(T)
+        ax.plot(x, actual,   color="#222222", lw=1.2, label="Actual",   zorder=3)
+        ax.plot(x, base_sim, color="#2166ac", lw=1.0, label="Base sim", zorder=2, linestyle="--")
+        if sc_sim is not None:
+            ax.plot(x, sc_sim, color="#d6604d", lw=1.0, label="Scenario sim", zorder=2, linestyle="-.")
+        ax.set_title(title, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.legend(fontsize=7)
+        ax.grid(True, linestyle="--", alpha=0.4)
+
+    # ── Base 행 ──────────────────────────────────────────────
+    gap_df = base.get("gap_df")
+    kp_df  = base.get("kp_df")
+    if gap_df is not None:
+        ax = fig.add_subplot(gs[0, 0])
+        _plot_one(ax, gap_df["actual_gap"].values, gap_df["simulated_gap"].values,
+                  None, "Base — GAP", "ETF Premium")
+    if kp_df is not None:
+        ax = fig.add_subplot(gs[0, 1])
+        _plot_one(ax, kp_df["actual_kp"].values, kp_df["simulated_kp"].values,
+                  None, "Base — KP (Kimchi Premium)", "KP")
+
+    # ── 시나리오별 행 ────────────────────────────────────────
+    for row_i, (sid, res) in enumerate(all_results.items(), 1):
+        actual_gap = res["actual_gap"]
+        rep_gap    = res["rep_gap"]
+        actual_kp  = res["actual_kp"]
+        rep_kp     = res["rep_kp"]
+
+        base_gap_sim = gap_df["simulated_gap"].values if gap_df is not None else None
+        base_kp_sim  = kp_df["simulated_kp"].values  if kp_df  is not None else None
+
+        ax = fig.add_subplot(gs[row_i, 0])
+        _plot_one(ax, actual_gap, base_gap_sim, rep_gap,
+                  f"{sid} — GAP", "ETF Premium")
+
+        ax = fig.add_subplot(gs[row_i, 1])
+        _plot_one(ax, actual_kp, base_kp_sim, rep_kp,
+                  f"{sid} — KP (Kimchi Premium)", "KP")
+
+    fig.suptitle("Base vs Scenario 시뮬레이션 비교", fontsize=12, fontweight="bold")
+    out_path = out_dir / "base_vs_scenario_comparison.png"
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  비교 플롯 저장: {out_path}")
+
+
+# ══════════════════════════════════════════════════════════════
 # 비교 요약 테이블
 # ══════════════════════════════════════════════════════════════
 
@@ -406,6 +785,127 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════
+# 레짐 캐시에서 K를 읽어 고정 K로 HMM 학습
+# ══════════════════════════════════════════════════════════════
+
+def _build_hmm_with_fixed_k(regime_cache_csv: Path) -> dict:
+    """regime_df_cache.csv에서 변수별 K를 읽고 고정 K로 HMM EM만 실행.
+
+    부트스트랩 LRT(K 선택)를 생략하므로 run_pipeline()보다 빠름.
+    """
+    from preprocessing.run_pipeline import load_data, step_har
+    from preprocessing.scenario_generator import fit_scenario_hmm
+
+    # ── K 읽기 ────────────────────────────────────────────────
+    df_cache = pd.read_csv(regime_cache_csv, index_col=0, parse_dates=True)
+    _REGIME_TO_VAR = {
+        "global_btc_svi_regime":   "global_btc_svi",
+        "domestic_btc_svi_regime": "domestic_btc_svi",
+        "btc_volume_btc_regime":   "btc_volume_btc",
+        "Global_RV_regime":        "Global_RV",
+        "VKOSPI_resid_regime":     "VKOSPI_resid",
+    }
+    k_per_var = {
+        var: int(df_cache[col].dropna().nunique())
+        for col, var in _REGIME_TO_VAR.items()
+        if col in df_cache.columns
+    }
+    print(f"  변수별 K: {k_per_var}")
+
+    # ── 데이터 로드 ───────────────────────────────────────────
+    df_daily, df_weekly = load_data()
+    har_result = step_har(df_daily, save=False)
+
+    results = {}
+
+    # 주별 SVI / Volume
+    for col in ["global_btc_svi", "domestic_btc_svi", "btc_volume_btc"]:
+        if col not in k_per_var or col not in df_weekly.columns:
+            continue
+        series = df_weekly[col].dropna().copy()
+        series.name = col
+        results[col] = fit_scenario_hmm(series, n_states=k_per_var[col])
+        print(f"    {col}: K={k_per_var[col]}  μ={results[col].mu}")
+
+    # 일별 Global_RV
+    if "Global_RV" in k_per_var and "Global_RV" in df_daily.columns:
+        series = df_daily["Global_RV"].dropna().copy()
+        series.name = "Global_RV"
+        results["Global_RV"] = fit_scenario_hmm(series, n_states=k_per_var["Global_RV"])
+        print(f"    Global_RV: K={k_per_var['Global_RV']}  μ={results['Global_RV'].mu}")
+
+    # 일별 VKOSPI_resid (HAR 잔차)
+    if "VKOSPI_resid" in k_per_var:
+        vkospi_idx = df_daily["VKOSPI"].dropna().index
+        resid = pd.Series(
+            har_result.residuals_z,
+            index=vkospi_idx[22:22 + len(har_result.residuals_z)],
+            name="VKOSPI_resid",
+        )
+        results["VKOSPI_resid"] = fit_scenario_hmm(resid, n_states=k_per_var["VKOSPI_resid"])
+        print(f"    VKOSPI_resid: K={k_per_var['VKOSPI_resid']}  μ={results['VKOSPI_resid'].mu}")
+
+    return results
+
+
+# ══════════════════════════════════════════════════════════════
+# 인터랙티브 시나리오 선택
+# ══════════════════════════════════════════════════════════════
+
+def _prompt_scenario_selection_csv(df_sc: pd.DataFrame) -> set[str] | None:
+    """시나리오 CSV를 보여주고 실행할 ID 집합을 반환. None이면 전체 실행."""
+    ids = df_sc["Scenario_ID"].tolist()
+    label_col = "combo_label" if "combo_label" in df_sc.columns else None
+
+    print("\n" + "=" * 60)
+    print("  실행할 시나리오를 선택하세요 (HMM 실행 전)")
+    print("=" * 60)
+    for i, row in enumerate(df_sc.itertuples(), 1):
+        sid = row.Scenario_ID
+        label = getattr(row, "combo_label", "") if label_col else ""
+        print(f"  [{i:>2}] {sid}  --  {label}")
+    print()
+    print("  입력 예시:")
+    print("    전체 실행  : all 또는 엔터")
+    print("    단일 선택  : 1")
+    print("    복수 선택  : 1,3,5  또는  S01,S03")
+    print()
+
+    while True:
+        raw = input("  선택: ").strip()
+
+        if raw == "" or raw.lower() == "all":
+            print(f"  → 전체 {len(ids)}개 시나리오 실행")
+            return None
+
+        tokens = [t.strip() for t in raw.replace(" ", ",").split(",") if t.strip()]
+        selected: list[str] = []
+        valid = True
+        for tok in tokens:
+            if tok.isdigit():
+                idx = int(tok) - 1
+                if 0 <= idx < len(ids):
+                    selected.append(ids[idx])
+                else:
+                    print(f"  [오류] 번호 범위 초과: {tok} (1~{len(ids)})")
+                    valid = False
+                    break
+            elif tok in ids:
+                selected.append(tok)
+            else:
+                print(f"  [오류] 알 수 없는 시나리오: {tok}")
+                valid = False
+                break
+
+        if not valid:
+            continue
+
+        result = list(dict.fromkeys(selected))  # 순서 유지 + 중복 제거
+        print(f"  → 선택된 시나리오: {result}")
+        return set(result)
+
+
+# ══════════════════════════════════════════════════════════════
 # 메인
 # ══════════════════════════════════════════════════════════════
 
@@ -427,31 +927,50 @@ def main():
     out_base = Path(args.out_dir)
     out_base.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: 파이프라인 실행 ────────────────────────────────
-    print("=" * 60)
-    print("  [Step 1] 전처리 파이프라인 실행")
-    print("=" * 60)
-    pipeline_out = run_pipeline(hmm_n_init=10, hmm_B=1000, save_plots=False,
-                                force_refit=args.force_refit)
-    hmm_results  = from_pipeline_results(pipeline_out)
-
-    # ── Step 2: 시나리오 로드 ──────────────────────────────────
-    print("\n" + "=" * 60)
-    print("  [Step 2] 시나리오 로드")
-    print("=" * 60)
+    # ── Step 0: 시나리오 선택 (HMM 실행 전) ───────────────────
     scenario_csv = Path(args.scenario_csv)
     if not scenario_csv.exists():
         raise FileNotFoundError(
             f"시나리오 CSV 없음: {scenario_csv}\n"
-            "analysis/scenario_selection.py 를 먼저 실행하세요."
+            "analysis/1_scenario_selection.py 를 먼저 실행하세요."
         )
+    df_sc = pd.read_csv(scenario_csv)
+
+    if args.scenarios:
+        selected_ids = set(args.scenarios.split(","))
+    else:
+        selected_ids = _prompt_scenario_selection_csv(df_sc)
+
+    # ── Step 1: HMM 파라미터 로드 (캐시 우선) ────────────────
+    print("\n" + "=" * 60)
+    print("  [Step 1] HMM 파라미터 로드")
+    print("=" * 60)
+    _hmm_cache_dir = _ROOT / "results" / "cache"
+    hmm_results = None
+    if not args.force_refit:
+        hmm_results = load_hmm_results_cache(_hmm_cache_dir, n_init=10, B=1000)
+
+    if hmm_results is None:
+        _regime_cache = _ROOT / "results" / "cache" / "regime_df_cache.csv"
+        if _regime_cache.exists() and not args.force_refit:
+            print("  [Cache MISS] 레짐 캐시에서 K 읽어 HMM 학습 (부트스트랩 LRT 생략)")
+            hmm_results = _build_hmm_with_fixed_k(_regime_cache)
+        else:
+            print("  [Cache MISS] 전처리 파이프라인 실행 (K 선택 포함)")
+            pipeline_out = run_pipeline(hmm_n_init=10, hmm_B=1000, save_plots=False,
+                                        force_refit=args.force_refit)
+            hmm_results = from_pipeline_results(pipeline_out)
+        save_hmm_results_cache(hmm_results, _hmm_cache_dir, n_init=10, B=1000)
+
+    # ── Step 2: 시나리오 로드 및 필터링 ───────────────────────
+    print("\n" + "=" * 60)
+    print("  [Step 2] 시나리오 로드")
+    print("=" * 60)
     all_scenarios = scenarios_from_csv(scenario_csv, hmm_results)
 
-    # 특정 시나리오만 실행하는 경우 필터링
-    if args.scenarios:
-        selected = set(args.scenarios.split(","))
-        all_scenarios = {k: v for k, v in all_scenarios.items() if k in selected}
-        print(f"  선택 실행: {list(all_scenarios.keys())}")
+    if selected_ids is not None:
+        all_scenarios = {k: v for k, v in all_scenarios.items() if k in selected_ids}
+    print(f"  실행 대상: {list(all_scenarios.keys())}")
 
     base_dir = str(_ROOT)
 
@@ -485,11 +1004,25 @@ def main():
         print("  실행된 시나리오 없음.")
         return {}
 
-    # ── Step 4: 비교 요약 저장 ─────────────────────────────────
+    # ── Step 4: Base vs 시나리오 비교 ────────────────────────
     print("\n" + "=" * 60)
-    print("  [Step 4] 시나리오 간 비교 요약")
+    print("  [Step 4] Base vs 시나리오 비교")
     print("=" * 60)
+
+    base = load_base_results()
+    if base is None:
+        print("  [!] Base 결과 없음 (results/simulator/validation_results.json)")
+        print("      simulator/main.py 를 먼저 실행하세요.")
+
     comparison_df = build_comparison_table(all_results)
+
+    # Base 행을 맨 위에 추가
+    if base is not None:
+        base_row_df = pd.DataFrame([_base_row(base)])
+        numeric_cols = base_row_df.select_dtypes(include=[float, int]).columns
+        base_row_df[numeric_cols] = base_row_df[numeric_cols].round(6)
+        comparison_df = pd.concat([base_row_df, comparison_df], ignore_index=True)
+
     comparison_path = out_base / "comparison_summary.csv"
     comparison_df.to_csv(comparison_path, index=False, encoding="utf-8-sig")
 
@@ -501,6 +1034,14 @@ def main():
         "kp_wmcr_price", "kp_pit_ks_p", "kp_wmcr_pass",
     ]].to_string(index=False))
     print(f"\n  비교 요약 저장: {comparison_path}")
+
+    # 가격경로 Fan Chart + 리스크 지표 비교
+    base_mc = load_base_mc_arrays()
+    if base_mc is not None:
+        plot_price_path_comparison(base_mc, all_results, out_base)
+    elif not args.no_plots and base is not None:
+        plot_base_vs_scenarios(base, all_results, out_base)
+
     print(f"  시나리오별 결과: {out_base}/<Scenario_ID>/")
 
     return all_results

@@ -31,6 +31,8 @@ Gaussian HMM 레짐 기반 시나리오 시계열 생성 파이프라인.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
@@ -106,6 +108,102 @@ class ScenarioHMMResult:
         for k in range(self.n_states):
             occ = (self.states == k).sum() / T
             print(f"  {k:<8} {self.mu[k]:>10.4f} {self.sigma[k]:>10.4f} {occ:>11.1%}")
+
+
+# ══════════════════════════════════════════════
+# HMM 결과 캐시 (μ, σ, states, transform 저장)
+# ══════════════════════════════════════════════
+
+_HMM_CACHE_META = "scenario_hmm_meta.json"
+_HMM_CACHE_NPZ  = "scenario_hmm_arrays.npz"
+
+_DATA_FILES_FOR_HMM = [
+    Path(__file__).resolve().parent.parent / "dataset" / "train_ver1" / "kp_train.csv",
+    Path(__file__).resolve().parent.parent / "dataset" / "train_ver1" / "gap_train.csv",
+]
+
+
+def _hmm_cache_key(n_init: int, B: int) -> str:
+    h = hashlib.md5()
+    for p in _DATA_FILES_FOR_HMM:
+        try:
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+        except FileNotFoundError:
+            h.update(b"missing")
+    h.update(json.dumps({"n_init": n_init, "B": B}).encode())
+    return h.hexdigest()
+
+
+def save_hmm_results_cache(
+    hmm_results: Dict[str, "ScenarioHMMResult"],
+    cache_dir:   Path,
+    n_init:      int = 10,
+    B:           int = 1000,
+) -> None:
+    """ScenarioHMMResult 딕셔너리를 캐시 파일로 저장."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    key = _hmm_cache_key(n_init, B)
+
+    meta: dict = {"cache_key": key, "variables": {}}
+    arrays: dict = {}
+
+    for var_name, res in hmm_results.items():
+        meta["variables"][var_name] = {
+            "n_states":  res.n_states,
+            "transform": res.transform,
+            "inverse":   res.inverse,
+        }
+        prefix = var_name.replace("/", "_")
+        arrays[f"{prefix}_mu"]     = res.mu
+        arrays[f"{prefix}_sigma"]  = res.sigma
+        arrays[f"{prefix}_states"] = res.states
+        if res.y_transformed is not None:
+            arrays[f"{prefix}_y_transformed"] = res.y_transformed
+
+    np.savez_compressed(str(cache_dir / _HMM_CACHE_NPZ), **arrays)
+    with open(cache_dir / _HMM_CACHE_META, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  [Cache] HMM 파라미터 캐시 저장: {cache_dir / _HMM_CACHE_NPZ}")
+
+
+def load_hmm_results_cache(
+    cache_dir: Path,
+    n_init:    int = 10,
+    B:         int = 1000,
+) -> Optional[Dict[str, "ScenarioHMMResult"]]:
+    """캐시에서 ScenarioHMMResult 딕셔너리 로드. 없거나 키 불일치 시 None 반환."""
+    meta_path = cache_dir / _HMM_CACHE_META
+    npz_path  = cache_dir / _HMM_CACHE_NPZ
+    if not meta_path.exists() or not npz_path.exists():
+        return None
+
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+
+    if meta.get("cache_key") != _hmm_cache_key(n_init, B):
+        return None
+
+    arrs = dict(np.load(str(npz_path), allow_pickle=False))
+    results: Dict[str, ScenarioHMMResult] = {}
+
+    for var_name, info in meta["variables"].items():
+        prefix = var_name.replace("/", "_")
+        y_t = arrs.get(f"{prefix}_y_transformed")
+        results[var_name] = ScenarioHMMResult(
+            var_name      = var_name,
+            n_states      = info["n_states"],
+            transform     = info["transform"],
+            inverse       = info["inverse"],
+            mu            = arrs[f"{prefix}_mu"],
+            sigma         = arrs[f"{prefix}_sigma"],
+            states        = arrs[f"{prefix}_states"],
+            y_transformed = y_t,
+        )
+
+    print(f"  [Cache HIT] HMM 파라미터 캐시 로드: {npz_path}")
+    return results
 
 
 # ══════════════════════════════════════════════
