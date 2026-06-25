@@ -30,6 +30,7 @@ HAR-VKOSPI → Gaussian HMM (전 변수) 을 순차 실행한다.
 
 from __future__ import annotations
 
+import pickle
 from pathlib import Path
 import sys
 
@@ -49,6 +50,7 @@ from preprocessing.gaussian_hmm import run_hmm_pipeline, HMMComparison
 
 DATA_DIR    = _ROOT / "dataset" / "train_ver1"
 RESULTS_DIR = _ROOT / "results" / "preprocessing"
+HMM_CACHE   = RESULTS_DIR / "hmm_cache.pkl"
 
 # HMM 대상 컬럼 (주별)
 HMM_SVI_COLS = ["global_btc_svi", "domestic_btc_svi", "btc_volume_btc"]
@@ -223,11 +225,17 @@ def step_hmm_vol(
 # ══════════════════════════════════════════════
 
 def main(
-    hmm_n_init: int  = 10,
-    hmm_B:      int  = 1000,
-    save_plots: bool = True,
+    hmm_n_init:   int  = 10,
+    hmm_B:        int  = 1000,
+    save_plots:   bool = True,
+    force_refit:  bool = False,
 ) -> dict:
     """전처리 파이프라인 전체 실행.
+
+    Parameters
+    ----------
+    force_refit : True 이면 캐시를 무시하고 HMM을 재실행한다.
+                  False(기본)이면 캐시가 있을 때 HMM 단계를 건너뛴다.
 
     Returns
     -------
@@ -249,10 +257,25 @@ def main(
     print("═" * 60)
     df_daily, df_weekly = load_data()
 
-    har_result      = step_har(df_daily, save=save_plots)
-    hmm_svi_results = step_hmm_svi(df_weekly, n_init=hmm_n_init, B=hmm_B, save=save_plots)
-    hmm_vol_results = step_hmm_vol(df_daily, har_result,
-                                    n_init=hmm_n_init, B=hmm_B, save=save_plots)
+    har_result = step_har(df_daily, save=save_plots)
+
+    if not force_refit and HMM_CACHE.exists():
+        print("\n" + "═" * 60)
+        print(f"  [HMM Cache] 캐시 로드: {HMM_CACHE}")
+        print("  (재실행하려면 force_refit=True 또는 --force-refit 사용)")
+        print("═" * 60)
+        with open(HMM_CACHE, "rb") as f:
+            cached = pickle.load(f)
+        hmm_svi_results = cached["hmm_svi"]
+        hmm_vol_results = cached["hmm_vol"]
+    else:
+        hmm_svi_results = step_hmm_svi(df_weekly, n_init=hmm_n_init, B=hmm_B, save=save_plots)
+        hmm_vol_results = step_hmm_vol(df_daily, har_result,
+                                        n_init=hmm_n_init, B=hmm_B, save=save_plots)
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(HMM_CACHE, "wb") as f:
+            pickle.dump({"hmm_svi": hmm_svi_results, "hmm_vol": hmm_vol_results}, f)
+        print(f"\n  [HMM Cache] 저장 완료: {HMM_CACHE}")
 
     # ── 최종 요약 ────────────────────────────────────────────
     print("\n" + "═" * 60)
@@ -295,4 +318,10 @@ def main(
 
 
 if __name__ == "__main__":
-    outputs = main(hmm_n_init=10, hmm_B=1000, save_plots=True)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force-refit", action="store_true",
+                        help="캐시 무시하고 HMM 재실행")
+    args = parser.parse_args()
+    outputs = main(hmm_n_init=10, hmm_B=1000, save_plots=True,
+                   force_refit=args.force_refit)

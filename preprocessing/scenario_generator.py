@@ -789,7 +789,7 @@ if __name__ == "__main__":
 
     # ── Step 1: 전처리 파이프라인 실행 ──────────────────────
     print("=== 전처리 파이프라인 실행 중 ===")
-    pipeline_out = run_pipeline(hmm_n_init=10, hmm_B=1000, save_plots=False)
+    pipeline_out = run_pipeline(hmm_n_init=10, hmm_B=1000, save_plots=False, force_refit=False)
 
     # ── Step 2: HMM 결과 → ScenarioHMMResult 변환 ───────────
     print("\n=== HMM 결과 요약 ===")
