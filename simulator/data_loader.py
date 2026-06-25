@@ -75,7 +75,7 @@ def load_gap_exog(
         base_dir: 프로젝트 루트 (None이면 이 파일 기준 상위 디렉터리)
 
     Returns:
-        DataFrame with columns: Date, etf_premium (GAP), Search Interest, VIX Volatility
+        DataFrame with columns: Date, etf_premium (GAP), value, btc_volatility
     """
     if base_dir is None:
         base_dir = str(Path(__file__).resolve().parent.parent)
@@ -93,14 +93,11 @@ def load_gap_exog(
     gap_df["Date"] = pd.to_datetime(gap_df["Date"])
     y_df["Date"] = pd.to_datetime(y_df["Date"])
 
-    # gap_train: value, btc_volatility → 시뮬레이터 호환명 Search Interest, VIX Volatility
-    if "value" in gap_df.columns and "btc_volatility" in gap_df.columns:
-        gap_df = gap_df.rename(columns={"value": "Search Interest", "btc_volatility": "VIX Volatility"})
-    if "Search Interest" not in gap_df.columns or "VIX Volatility" not in gap_df.columns:
-        raise ValueError("gap 데이터에 'Search Interest', 'VIX Volatility' (또는 value, btc_volatility) 컬럼 필요")
+    if "value" not in gap_df.columns or "btc_volatility" not in gap_df.columns:
+        raise ValueError("gap 데이터에 'value', 'btc_volatility' 컬럼 필요")
 
     merged = y_df[["Date", "etf_premium"]].merge(
-        gap_df[["Date", "Search Interest", "VIX Volatility"]],
+        gap_df[["Date", "value", "btc_volatility"]],
         on="Date",
         how="inner",
     )

@@ -7,8 +7,9 @@ NAV, GAP, KP 시뮬레이터 실행 스크립트
 - 몬테카를로 시뮬레이션 → 검증 + 시각화
 """
 
-import sys
+import hashlib
 import json
+import sys
 import numpy as np
 from pathlib import Path
 
@@ -52,6 +53,58 @@ def _to_serializable(obj):
         return str(obj)
 
 
+def _file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except FileNotFoundError:
+        return "missing"
+
+
+def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int, seed: int) -> str:
+    data_files = [
+        Path(base_dir) / "dataset" / "train" / "nav_train.csv",
+        Path(base_dir) / "dataset" / "train" / "gap_train_main.csv",
+        Path(base_dir) / "dataset" / "train" / "kp_train_main.csv",
+        Path(base_dir) / "dataset" / "raw" / "y_variables.csv",
+        Path(base_dir) / "dataset" / "raw" / "y_true_variables.csv",
+    ]
+    h = hashlib.md5()
+    for p in data_files:
+        h.update(_file_md5(str(p)).encode())
+    h.update(json.dumps({
+        "ar_order": list(ar_order), "S0": S0,
+        "n_simulations": n_simulations, "seed": seed,
+    }, sort_keys=True).encode())
+    return h.hexdigest()
+
+
+def _save_sim_cache(cache_dir: Path, key: str, arrays: dict, meta: dict) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(str(cache_dir / "sim_arrays.npz"), **arrays)
+    payload = {"cache_key": key}
+    payload.update(_to_serializable(meta))
+    with open(cache_dir / "sim_meta.json", "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    print(f"  [Cache] 저장 완료: {cache_dir / 'sim_arrays.npz'}")
+
+
+def _load_sim_cache(cache_dir: Path, key: str):
+    meta_path = cache_dir / "sim_meta.json"
+    npz_path = cache_dir / "sim_arrays.npz"
+    if not meta_path.exists() or not npz_path.exists():
+        return None, None
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    if meta.get("cache_key") != key:
+        return None, None
+    arrs = dict(np.load(str(npz_path)))
+    return arrs, meta
+
+
 def main():
     parser = argparse.ArgumentParser(description="NAV ARIMAX-GARCH-t 시뮬레이터 (검증·시각화 포함)")
     parser.add_argument("--base-dir", type=str, default=None, help="프로젝트 루트")
@@ -62,6 +115,7 @@ def main():
     parser.add_argument("--out-dir", type=str, default=None, help="결과 저장 디렉터리 (기본: results/simulator)")
     parser.add_argument("--no-save", action="store_true", help="파일 저장 안 함")
     parser.add_argument("--wmcr-alpha", type=float, default=0.05, help="WMCR 검정 유의수준")
+    parser.add_argument("--no-cache", action="store_true", help="캐시 사용 안 함 (강제 재실행)")
     args = parser.parse_args()
 
     base_dir = args.base_dir or str(_root)
@@ -73,6 +127,10 @@ def main():
         (out_dir / "plots" / "kp").mkdir(parents=True, exist_ok=True)
         (out_dir / "plots" / "combined").mkdir(parents=True, exist_ok=True)
 
+    ar_order = tuple(args.ar_order)
+    S0 = args.S0
+    cache_dir = out_dir / "cache"
+
     # 1) 데이터 로드
     print("\n[1단계] 데이터 로드")
     df = load_nav_exog_and_returns(base_dir=base_dir)
@@ -80,26 +138,39 @@ def main():
     exog = None
     T = len(log_returns)
     actual_returns = np.asarray(log_returns).flatten()
-    S0 = args.S0
     actual_nav = np.asarray(log_returns_to_nav(pd.Series(actual_returns), S0=S0)).flatten()
 
-    # 2) ARIMAX-GARCH-t 적합
-    print("\n[2단계] ARIMAX-GARCH-t 적합")
-    ar_order = tuple(args.ar_order)
-    sim = fit_arimax_garch_t(log_returns=log_returns, exog=exog, ar_order=ar_order)
+    # 캐시 체크
+    cache_key = _sim_cache_key(base_dir, ar_order, S0, args.n_simulations, args.seed)
+    _skip_models = False
+    cached_arrs, cached_meta = None, None
+    if not args.no_cache:
+        cached_arrs, cached_meta = _load_sim_cache(cache_dir, cache_key)
+        if cached_arrs is not None:
+            print("\n[Cache HIT] 저장된 시뮬레이션 결과 로드 → 모델/시뮬레이션 건너뜀")
+            _skip_models = True
 
-    # 3) 몬테카를로 시뮬레이션 (실제 기간 T와 동일)
-    print(f"\n[3단계] 몬테카를로 시뮬레이션 (n={args.n_simulations}, T={T})")
-    all_returns = []
-    all_nav = []
-    for i in range(args.n_simulations):
-        sim_ret = sim.simulate_returns(T=T, exog_future=None, seed=args.seed + i)
-        ret_arr = np.asarray(sim_ret).flatten()
-        nav_arr = np.asarray(log_returns_to_nav(pd.Series(ret_arr), S0=S0)).flatten()
-        all_returns.append(ret_arr)
-        all_nav.append(nav_arr)
-    monte_carlo_returns_array = np.array(all_returns)
-    monte_carlo_nav_array = np.array(all_nav)
+    if _skip_models:
+        monte_carlo_returns_array = cached_arrs["mc_nav_ret"]
+        monte_carlo_nav_array = cached_arrs["mc_nav"]
+    else:
+        # 2) ARIMAX-GARCH-t 적합
+        print("\n[2단계] ARIMAX-GARCH-t 적합")
+        sim = fit_arimax_garch_t(log_returns=log_returns, exog=exog, ar_order=ar_order)
+
+        # 3) 몬테카를로 시뮬레이션 (실제 기간 T와 동일)
+        print(f"\n[3단계] 몬테카를로 시뮬레이션 (n={args.n_simulations}, T={T})")
+        all_returns = []
+        all_nav = []
+        for i in range(args.n_simulations):
+            sim_ret = sim.simulate_returns(T=T, exog_future=None, seed=args.seed + i)
+            ret_arr = np.asarray(sim_ret).flatten()
+            nav_arr = np.asarray(log_returns_to_nav(pd.Series(ret_arr), S0=S0)).flatten()
+            all_returns.append(ret_arr)
+            all_nav.append(nav_arr)
+        monte_carlo_returns_array = np.array(all_returns)
+        monte_carlo_nav_array = np.array(all_nav)
+
     representative_returns = np.median(monte_carlo_returns_array, axis=0)
     representative_nav = np.median(monte_carlo_nav_array, axis=0)
 
@@ -223,40 +294,56 @@ def main():
     print("\n[GAP-1단계] 데이터 로드")
     df_gap = load_gap_exog(base_dir=base_dir)
     gap_series = df_gap["etf_premium"]
-    si_series = df_gap["Search Interest"]
-    vix_series = df_gap["VIX Volatility"]
+    si_series = df_gap["value"]
+    vix_series = df_gap["btc_volatility"]
     T_gap = len(gap_series)
     actual_gap = np.asarray(gap_series).flatten()
-    
-    # GAP-2) OU 모델 적합
-    print("\n[GAP-2단계] OU 모델 적합 (외생변수: SI, VIX)")
-    gap_sim = fit_gap_ou(
-        gap_series=gap_series,
-        si_series=si_series,
-        vix_series=vix_series,
-        clip=3.0,
-        regularization=0.01
-    )
-    print(f"  κ (kappa): {gap_sim.kappa:.6f}")
-    print(f"  μ (mu): {gap_sim.mu:.6f}")
-    print(f"  σ0 (sigma0): {gap_sim.sigma0:.6f}")
-    print(f"  δ1 (delta1, SI): {gap_sim.delta1:.6f}")
-    print(f"  δ2 (delta2, VIX): {gap_sim.delta2:.6f}")
-    
-    # GAP-3) 몬테카를로 시뮬레이션
-    print(f"\n[GAP-3단계] 몬테카를로 시뮬레이션 (n={args.n_simulations}, T={T_gap})")
-    all_gap = []
-    g0 = actual_gap[0] if len(actual_gap) > 0 else gap_sim.mu
-    for i in range(args.n_simulations):
-        sim_gap = gap_sim.simulate_gap(
-            T=T_gap,
-            g0=g0,
-            si_future=si_series.values,
-            vix_future=vix_series.values,
-            seed=args.seed + 10000 + i
+    g0 = actual_gap[0] if len(actual_gap) > 0 else 0.0
+
+    if _skip_models:
+        monte_carlo_gap_array = cached_arrs["mc_gap"]
+        gap_params_dict = (cached_meta or {}).get("gap_params", {})
+        print("\n[GAP-2,3단계] 캐시 로드 (모델 생략)")
+        if gap_params_dict:
+            print(f"  κ (kappa): {gap_params_dict.get('kappa', 'N/A')}")
+            print(f"  μ (mu): {gap_params_dict.get('mu', 'N/A')}")
+            print(f"  σ0 (sigma0): {gap_params_dict.get('sigma0', 'N/A')}")
+            print(f"  δ1 (delta1, SI): {gap_params_dict.get('delta1', 'N/A')}")
+            print(f"  δ2 (delta2, VIX): {gap_params_dict.get('delta2', 'N/A')}")
+    else:
+        # GAP-2) OU 모델 적합
+        print("\n[GAP-2단계] OU 모델 적합 (외생변수: SI, VIX)")
+        gap_sim = fit_gap_ou(
+            gap_series=gap_series,
+            si_series=si_series,
+            vix_series=vix_series,
+            clip=3.0,
+            regularization=0.01
         )
-        all_gap.append(np.asarray(sim_gap).flatten())
-    monte_carlo_gap_array = np.array(all_gap)
+        print(f"  κ (kappa): {gap_sim.kappa:.6f}")
+        print(f"  μ (mu): {gap_sim.mu:.6f}")
+        print(f"  σ0 (sigma0): {gap_sim.sigma0:.6f}")
+        print(f"  δ1 (delta1, SI): {gap_sim.delta1:.6f}")
+        print(f"  δ2 (delta2, VIX): {gap_sim.delta2:.6f}")
+        gap_params_dict = {
+            "kappa": gap_sim.kappa, "mu": gap_sim.mu,
+            "sigma0": gap_sim.sigma0, "delta1": gap_sim.delta1, "delta2": gap_sim.delta2,
+        }
+
+        # GAP-3) 몬테카를로 시뮬레이션
+        print(f"\n[GAP-3단계] 몬테카를로 시뮬레이션 (n={args.n_simulations}, T={T_gap})")
+        all_gap = []
+        for i in range(args.n_simulations):
+            sim_gap = gap_sim.simulate_gap(
+                T=T_gap,
+                g0=g0,
+                si_future=si_series.values,
+                vix_future=vix_series.values,
+                seed=args.seed + 10000 + i
+            )
+            all_gap.append(np.asarray(sim_gap).flatten())
+        monte_carlo_gap_array = np.array(all_gap)
+
     representative_gap = np.median(monte_carlo_gap_array, axis=0)
     
     # GAP-4) 통계적 검정 (PIT-KS 등)
@@ -349,45 +436,85 @@ def main():
     bitcoin_kr_series = df_kp["bitcoin_kr"]
     T_kp = len(kp_series)
     actual_kp = np.asarray(kp_series).flatten()
+    kp0 = actual_kp[0] if len(actual_kp) > 0 else 0.0
 
-    # KP-2) Threshold-OU 모델 적합
-    print("\n[KP-2단계] Threshold-OU 모델 적합 (외생변수: volume_btc, KOSPI_Volatility, bitcoin_kr)")
-    kp_sim = fit_kp_threshold_ou(
-        kp_series=kp_series,
-        volume_btc=volume_btc_series,
-        kospi_vol=kospi_vol_series,
-        bitcoin_kr=bitcoin_kr_series,
-        threshold=None,  # 자동 선택
-        clip=3.0,
-        regularization=0.01
-    )
-    print(f"  최적 임계값 τ: {kp_sim.threshold:.6f}")
-    print(f"  레짐별 파라미터:")
-    for r in [0, 1, 2]:
-        regime_name = ["|KP| ≤ τ", "KP > τ", "KP < -τ"][r]
-        print(f"    레짐 {r} ({regime_name}):")
-        print(f"      κ_{r}: {kp_sim.regime_params[r]['kappa']:.6f}")
-        print(f"      μ_{r}: {kp_sim.regime_params[r]['mu']:.6f}")
-        print(f"      σ0_{r}: {kp_sim.regime_params[r]['sigma0']:.6f}")
-        print(f"      δ1_{r} (volume_btc): {kp_sim.delta1_regime[r]:.6f}")
-        print(f"      δ2_{r} (KOSPI_Vol): {kp_sim.delta2_regime[r]:.6f}")
-        print(f"      δ3_{r} (bitcoin_kr): {kp_sim.delta3_regime[r]:.6f}")
-
-    # KP-3) 몬테카를로 시뮬레이션
-    print(f"\n[KP-3단계] 몬테카를로 시뮬레이션 (n={args.n_simulations}, T={T_kp})")
-    all_kp = []
-    kp0 = actual_kp[0] if len(actual_kp) > 0 else kp_sim.regime_params[0]['mu']
-    for i in range(args.n_simulations):
-        sim_kp = kp_sim.simulate_kp(
-            T=T_kp,
-            kp0=kp0,
-            volume_btc_future=volume_btc_series.values,
-            kospi_vol_future=kospi_vol_series.values,
-            bitcoin_kr_future=bitcoin_kr_series.values,
-            seed=args.seed + 20000 + i
+    if _skip_models:
+        monte_carlo_kp_array = cached_arrs["mc_kp"]
+        kp_params_dict = (cached_meta or {}).get("kp_params", {})
+        print("\n[KP-2,3단계] 캐시 로드 (모델 생략)")
+        if kp_params_dict:
+            print(f"  최적 임계값 τ: {kp_params_dict.get('threshold', 'N/A')}")
+            rp = kp_params_dict.get("regime_params", {})
+            for r in [0, 1, 2]:
+                regime_name = ["|KP| ≤ τ", "KP > τ", "KP < -τ"][r]
+                rd = rp.get(str(r), {})
+                print(f"    레짐 {r} ({regime_name}): "
+                      f"κ={rd.get('kappa', 'N/A')}  μ={rd.get('mu', 'N/A')}")
+    else:
+        # KP-2) Threshold-OU 모델 적합
+        print("\n[KP-2단계] Threshold-OU 모델 적합 (외생변수: volume_btc, KOSPI_Volatility, bitcoin_kr)")
+        kp_sim = fit_kp_threshold_ou(
+            kp_series=kp_series,
+            volume_btc=volume_btc_series,
+            kospi_vol=kospi_vol_series,
+            bitcoin_kr=bitcoin_kr_series,
+            threshold=None,
+            clip=3.0,
+            regularization=0.01
         )
-        all_kp.append(np.asarray(sim_kp).flatten())
-    monte_carlo_kp_array = np.array(all_kp)
+        print(f"  최적 임계값 τ: {kp_sim.threshold:.6f}")
+        print(f"  레짐별 파라미터:")
+        for r in [0, 1, 2]:
+            regime_name = ["|KP| ≤ τ", "KP > τ", "KP < -τ"][r]
+            print(f"    레짐 {r} ({regime_name}):")
+            print(f"      κ_{r}: {kp_sim.regime_params[r]['kappa']:.6f}")
+            print(f"      μ_{r}: {kp_sim.regime_params[r]['mu']:.6f}")
+            print(f"      σ0_{r}: {kp_sim.regime_params[r]['sigma0']:.6f}")
+            print(f"      δ1_{r} (volume_btc): {kp_sim.delta1_regime[r]:.6f}")
+            print(f"      δ2_{r} (KOSPI_Vol): {kp_sim.delta2_regime[r]:.6f}")
+            print(f"      δ3_{r} (bitcoin_kr): {kp_sim.delta3_regime[r]:.6f}")
+        kp_params_dict = {
+            "threshold": kp_sim.threshold,
+            "regime_params": {
+                str(r): {
+                    "kappa": kp_sim.regime_params[r]['kappa'],
+                    "mu": kp_sim.regime_params[r]['mu'],
+                    "sigma0": kp_sim.regime_params[r]['sigma0'],
+                    "delta1": kp_sim.delta1_regime[r],
+                    "delta2": kp_sim.delta2_regime[r],
+                    "delta3": kp_sim.delta3_regime[r],
+                }
+                for r in [0, 1, 2]
+            },
+        }
+
+        # KP-3) 몬테카를로 시뮬레이션
+        print(f"\n[KP-3단계] 몬테카를로 시뮬레이션 (n={args.n_simulations}, T={T_kp})")
+        all_kp = []
+        for i in range(args.n_simulations):
+            sim_kp = kp_sim.simulate_kp(
+                T=T_kp,
+                kp0=kp0,
+                volume_btc_future=volume_btc_series.values,
+                kospi_vol_future=kospi_vol_series.values,
+                bitcoin_kr_future=bitcoin_kr_series.values,
+                seed=args.seed + 20000 + i
+            )
+            all_kp.append(np.asarray(sim_kp).flatten())
+        monte_carlo_kp_array = np.array(all_kp)
+
+        # 캐시 저장 (최초 실행 시 모든 MC 완료 후)
+        if not args.no_cache:
+            _save_sim_cache(cache_dir, cache_key, {
+                "mc_nav_ret": monte_carlo_returns_array,
+                "mc_nav": monte_carlo_nav_array,
+                "mc_gap": monte_carlo_gap_array,
+                "mc_kp": monte_carlo_kp_array,
+            }, {
+                "gap_params": gap_params_dict,
+                "kp_params": kp_params_dict,
+            })
+
     representative_kp = np.median(monte_carlo_kp_array, axis=0)
     
     # KP-4) 통계적 검정 (PIT-KS 등)
@@ -683,11 +810,11 @@ def main():
                 "summary_text": wmcr_test_gap['summary_text'],
             },
             "ou_params": {
-                "kappa": gap_sim.kappa,
-                "mu": gap_sim.mu,
-                "sigma0": gap_sim.sigma0,
-                "delta1": gap_sim.delta1,
-                "delta2": gap_sim.delta2,
+                "kappa": gap_params_dict.get("kappa"),
+                "mu": gap_params_dict.get("mu"),
+                "sigma0": gap_params_dict.get("sigma0"),
+                "delta1": gap_params_dict.get("delta1"),
+                "delta2": gap_params_dict.get("delta2"),
             },
             "T": T_gap,
         },
@@ -703,16 +830,9 @@ def main():
                 "summary_text": wmcr_test_kp['summary_text'],
             },
             "threshold_ou_params": {
-                "threshold": kp_sim.threshold,
+                "threshold": kp_params_dict.get("threshold"),
                 "regime_params": {
-                    r: {
-                        "kappa": kp_sim.regime_params[r]['kappa'],
-                        "mu": kp_sim.regime_params[r]['mu'],
-                        "sigma0": kp_sim.regime_params[r]['sigma0'],
-                        "delta1": kp_sim.delta1_regime[r],
-                        "delta2": kp_sim.delta2_regime[r],
-                        "delta3": kp_sim.delta3_regime[r],
-                    }
+                    r: kp_params_dict.get("regime_params", {}).get(str(r), {})
                     for r in [0, 1, 2]
                 },
             },
@@ -784,7 +904,7 @@ def main():
 
     return {
         "nav": {
-            "simulator": sim,
+            "simulator": sim if not _skip_models else None,
             "statistical_tests": statistical_tests,
             "validation_metrics": validation_metrics,
             "wmcr_test_nav": wmcr_test_nav,
@@ -797,7 +917,7 @@ def main():
             "T": T,
         },
         "gap": {
-            "simulator": gap_sim,
+            "simulator": gap_sim if not _skip_models else None,
             "statistical_tests": gap_statistical_tests,
             "validation_metrics": gap_validation_metrics,
             "wmcr_test": wmcr_test_gap,
@@ -806,7 +926,7 @@ def main():
             "T": T_gap,
         },
         "kp": {
-            "simulator": kp_sim,
+            "simulator": kp_sim if not _skip_models else None,
             "statistical_tests": kp_statistical_tests,
             "validation_metrics": kp_validation_metrics,
             "wmcr_test": wmcr_test_kp,

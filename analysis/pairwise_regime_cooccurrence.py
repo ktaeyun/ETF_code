@@ -15,7 +15,9 @@ analysis/pairwise_regime_cooccurrence.py
 
 from __future__ import annotations
 
+import hashlib
 import itertools
+import json
 import sys
 from pathlib import Path
 
@@ -26,7 +28,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from preprocessing.run_pipeline import load_data, step_har, step_hmm, step_hmm_svi
+from preprocessing.run_pipeline import load_data, step_har, step_hmm_vol, step_hmm_svi
 
 
 # ══════════════════════════════════════════════════════════════
@@ -55,6 +57,61 @@ _DISPLAY_COLS = ["Bitcoin_RV", "VKOSPI", "KR_Volume", "KR_SVI", "Global_SVI"]
 
 SCENARIO_CSV_PATH = _ROOT / "results" / "scenario_selection" / "final_scenarios_latest.csv"
 EXOG_SAVE_PATH    = _ROOT / "results" / "scenario_exog_vars"
+
+_REGIME_CACHE_DIR  = _ROOT / "results" / "cache"
+_REGIME_CACHE_CSV  = _REGIME_CACHE_DIR / "regime_df_cache.csv"
+_REGIME_CACHE_META = _REGIME_CACHE_DIR / "regime_df_meta.json"
+_REGIME_DATA_FILES = [
+    _ROOT / "dataset" / "train_ver1" / "kp_train.csv",
+    _ROOT / "dataset" / "train_ver1" / "gap_train.csv",
+]
+
+
+def _file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except FileNotFoundError:
+        return "missing"
+
+
+def _regime_cache_key(n_init: int, B: int) -> str:
+    h = hashlib.md5()
+    for p in _REGIME_DATA_FILES:
+        h.update(_file_md5(p).encode())
+    h.update(json.dumps({"n_init": n_init, "B": B}).encode())
+    return h.hexdigest()
+
+
+def load_or_build_regime_df(n_init: int = 10, B: int = 1000) -> pd.DataFrame:
+    """캐시가 있으면 로드, 없으면 build_regime_df() 실행 후 캐시 저장."""
+    key = _regime_cache_key(n_init, B)
+
+    if _REGIME_CACHE_META.exists() and _REGIME_CACHE_CSV.exists():
+        with open(_REGIME_CACHE_META, encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("cache_key") == key:
+            print(f"  [Cache HIT] HMM 레짐 캐시 로드: {_REGIME_CACHE_CSV}")
+            df = pd.read_csv(_REGIME_CACHE_CSV, index_col=0, parse_dates=True)
+            for col in REGIME_COLS:
+                if col in df.columns:
+                    df[col] = df[col].astype("Int64")
+            df.index.name = "Date"
+            return df
+
+    print(f"  [Cache MISS] HMM 레짐 학습 시작 (n_init={n_init}, B={B})")
+    df = build_regime_df(n_init=n_init, B=B)
+
+    _REGIME_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    df.to_csv(_REGIME_CACHE_CSV)
+    with open(_REGIME_CACHE_META, "w", encoding="utf-8") as f:
+        json.dump({"cache_key": key, "n_init": n_init, "B": B}, f, indent=2)
+    print(f"  [Cache] HMM 레짐 캐시 저장: {_REGIME_CACHE_CSV}")
+
+    return df
 
 
 # ══════════════════════════════════════════════════════════════
@@ -100,7 +157,7 @@ def build_regime_df(
     print("\n" + "=" * 60)
     print("  [Step 4] HMM — 변동성 (일별)")
     print("=" * 60)
-    hmm_vol = step_hmm(df_daily, har_result, n_init=n_init, B=B, save=False)
+    hmm_vol = step_hmm_vol(df_daily, har_result, n_init=n_init, B=B, save=False)
 
     # 일별 인덱스
     daily_idx = df_daily.index   # df_daily는 dropna() 완료
@@ -537,8 +594,8 @@ def save_exog(
 # ══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    # ── HMM 레짐 DataFrame 구축 ────────────────────────────────
-    df_regime = build_regime_df(n_init=10, B=1000)
+    # ── HMM 레짐 DataFrame 구축 (캐시 우선) ───────────────────
+    df_regime = load_or_build_regime_df(n_init=10, B=1000)
 
     # ── 공통빈도 지표 계산 ─────────────────────────────────────
     print("\n" + "=" * 60)

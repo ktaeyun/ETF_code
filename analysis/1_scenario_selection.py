@@ -27,7 +27,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from analysis.pairwise_regime_cooccurrence import build_regime_df
+from analysis.pairwise_regime_cooccurrence import load_or_build_regime_df
 
 
 # ══════════════════════════════════════════════════════════════
@@ -55,44 +55,6 @@ THEORETICAL_STATES: dict[str, list[str]] = {
 
 CLASSIFIED_TABLE_PATH = _ROOT / "results" / "regime_classified_table.csv"
 SCENARIO_DIR          = _ROOT / "results" / "scenario_selection"
-
-AXES: dict[str, dict[str, set[str]]] = {
-    "Axis1_Decoupling": {
-        "Global_SVI": {"Low", "Mid"},
-        "KR_SVI":     {"High"},
-        "KR_Volume":  {"High"},
-        "Bitcoin_RV": {"Low", "Mid"},
-        "VKOSPI":     {"Normal"},
-    },
-    "Axis2A_FlightToCrypto": {
-        "VKOSPI":     {"Extreme"},
-        "KR_Volume":  {"High"},
-        "KR_SVI":     {"High"},
-        "Bitcoin_RV": {"Mid"},
-        "Global_SVI": {"Low", "Mid"},
-    },
-    "Axis2B_AssetRotation": {
-        "VKOSPI":     {"Normal"},
-        "KR_Volume":  {"Low"},
-        "KR_SVI":     {"Low"},
-        "Bitcoin_RV": {"Mid", "High"},
-        "Global_SVI": {"Mid", "High"},
-    },
-    "Axis3_AttentionTrade": {
-        "KR_SVI":     {"High"},
-        "KR_Volume":  {"High"},
-        "Bitcoin_RV": {"Mid"},
-        "Global_SVI": {"Low", "Mid"},
-        "VKOSPI":     {"Normal"},
-    },
-}
-
-AXIS_LABELS: dict[str, str] = {
-    "Axis1_Decoupling":      "Axis 1 – Global-Local Decoupling",
-    "Axis2A_FlightToCrypto": "Axis 2A – Flight to Crypto",
-    "Axis2B_AssetRotation":  "Axis 2B – Asset Rotation",
-    "Axis3_AttentionTrade":  "Axis 3 – Attention-to-Trade",
-}
 
 PAIRWISE_JUDGEMENT_PATH = _ROOT / "results" / "scenario_pair_possible_ambiguity.csv"
 
@@ -225,21 +187,6 @@ def reclassify_from_pairwise_csv(
     return df
 
 
-def tag_axis_matches(df_combo: pd.DataFrame) -> pd.DataFrame:
-    """각 조합에 매칭되는 한국 특수성 축 이름을 'matched_axes' 컬럼으로 추가."""
-    def _axes_for(row: pd.Series) -> str:
-        matched = [
-            AXIS_LABELS[k]
-            for k, axis_def in AXES.items()
-            if _matches_axis(row, axis_def)
-        ]
-        return " | ".join(matched) if matched else ""
-
-    df = df_combo.copy()
-    df["matched_axes"] = df.apply(_axes_for, axis=1)
-    return df
-
-
 # ══════════════════════════════════════════════════════════════
 # Step 2 보조: 공통빈도 지표
 # ══════════════════════════════════════════════════════════════
@@ -291,7 +238,7 @@ def build_classified_table(n_init: int = 10, B: int = 1000) -> pd.DataFrame:
     print("  [MODE A] 레짐 분류 테이블 구축")
     print("=" * 60)
 
-    df_regime = build_regime_df(n_init=n_init, B=B)
+    df_regime = load_or_build_regime_df(n_init=n_init, B=B)
     label_maps = _make_label_maps(df_regime)
 
     print("\n  레이블 매핑:")
@@ -319,9 +266,15 @@ def build_classified_table(n_init: int = 10, B: int = 1000) -> pd.DataFrame:
         return _pairwise_lift_mean(combo, lift_dict)
 
     grouped["pairwise_lift_mean"] = grouped.apply(_row_lift_mean, axis=1)
-    grouped["theoretical_class"] = np.where(
-        grouped["pairwise_lift_mean"] >= 1.0, "Possible", "Ambiguity"
-    )
+
+    # Possible/Ambiguity 판정: scenario_pair_possible_ambiguity.csv 기반
+    if PAIRWISE_JUDGEMENT_PATH.exists():
+        grouped = reclassify_from_pairwise_csv(grouped, PAIRWISE_JUDGEMENT_PATH)
+    else:
+        print(f"  [경고] {PAIRWISE_JUDGEMENT_PATH.name} 없음 → lift 기반으로 대체")
+        grouped["theoretical_class"] = np.where(
+            grouped["pairwise_lift_mean"] >= 1.0, "Possible", "Ambiguity"
+        )
 
     col_order = ["combo_label"] + DISPLAY_COLS + [
         "joint_frequency", "joint_prob", "pairwise_lift_mean", "theoretical_class"
@@ -370,19 +323,13 @@ def _count_shared_states(a: pd.Series, b: pd.Series) -> int:
 
 def step3_core(
     df_combo:             pd.DataFrame,
-    diversity_constraint: int | None = 2,
+    diversity_constraint: int | None = None,
     lift_threshold:       float      = 1.0,
     freq_threshold:       int        = 1,
 ) -> pd.DataFrame:
-    """Step 3: Possible 조합에서 핵심 시나리오 선택.
+    """Step 3: CSV 판정 기준 Possible 조합 전체 반환.
 
-    Parameters
-    ----------
-    df_combo             : regime_classified_table
-    diversity_constraint : 이미 선택된 모든 시나리오와 공유 가능한 최대 동일 레이블 수.
-                           None 이면 다양성 제약 없이 Possible 전체 선택.
-    lift_threshold       : pairwise_lift_mean 최소 기준
-    freq_threshold       : 최소 공통 발생 횟수 (>= freq_threshold)
+    diversity_constraint=None(기본값): 제약 없이 Possible 전체 반환.
     """
     print("\n" + "=" * 60)
     print("  [Step 3] 핵심 시나리오 선택")
@@ -391,14 +338,13 @@ def step3_core(
           f"lift_threshold={lift_threshold}  freq_threshold={freq_threshold}")
     print("=" * 60)
 
-    # 입력 필터: Possible + 최소 빈도
+    # 입력 필터: CSV 판정 Possible + 최소 빈도 (lift는 참조 지표, 필터 제외)
     candidates = df_combo[
         (df_combo["theoretical_class"] == "Possible") &
-        (df_combo["pairwise_lift_mean"] >= lift_threshold) &
         (df_combo["joint_frequency"] >= freq_threshold)
     ].sort_values("joint_frequency", ascending=False).reset_index(drop=True)
 
-    print(f"  후보 수 (Possible, lift ≥ {lift_threshold}, freq ≥ {freq_threshold}): "
+    print(f"  후보 수 (Possible, freq ≥ {freq_threshold}): "
           f"{len(candidates)}")
 
     if diversity_constraint is None:
@@ -436,161 +382,36 @@ def step3_core(
 
 
 # ══════════════════════════════════════════════════════════════
-# Step 4: 보완 시나리오 선택
-# ══════════════════════════════════════════════════════════════
-
-def _matches_axis(row: pd.Series, axis_def: dict[str, set[str]]) -> bool:
-    """행이 축 정의의 모든 조건을 만족하는지 확인."""
-    return all(row[col] in vals for col, vals in axis_def.items())
-
-
-def step4_supplemental(
-    df_combo:     pd.DataFrame,
-    core_labels:  set[str],
-    lift_threshold: float = 1.0,
-) -> pd.DataFrame:
-    """Step 4: 한국 시장 특이성 4개 축별 보완 시나리오 선택."""
-    print("\n" + "=" * 60)
-    print("  [Step 4] 보완 시나리오 선택")
-    print("=" * 60)
-
-    # 핵심에서 선택되지 않은 후보 (빈도 > 0)
-    pool = df_combo[
-        (df_combo["joint_frequency"] > 0) &
-        (~df_combo["combo_label"].isin(core_labels))
-    ].copy()
-
-    rows: list[dict] = []
-
-    for axis_key, axis_def in AXES.items():
-        axis_label = AXIS_LABELS[axis_key]
-        matched = pool[pool.apply(_matches_axis, axis=1, axis_def=axis_def)]
-
-        if matched.empty:
-            print(f"  {axis_label}: No candidate")
-            rows.append({"Axis": axis_label, **{c: "-" for c in DISPLAY_COLS},
-                         "joint_frequency": 0, "pairwise_lift_mean": np.nan,
-                         "theoretical_class": "-", "Priority": "-",
-                         "combo_label": "-"})
-            continue
-
-        # 우선순위 부여
-        def _priority(r: pd.Series) -> int:
-            is_possible = r["theoretical_class"] == "Possible"
-            lift_above  = r["pairwise_lift_mean"] > lift_threshold
-            if is_possible and lift_above:
-                return 1
-            if is_possible:
-                return 2
-            if lift_above:
-                return 3
-            return 4
-
-        matched = matched.copy()
-        matched["Priority"] = matched.apply(_priority, axis=1)
-        matched = matched.sort_values(
-            ["Priority", "joint_frequency"], ascending=[True, False]
-        )
-        best = matched.iloc[0]
-
-        print(f"  {axis_label}: "
-              f"{best['combo_label']}  "
-              f"freq={best['joint_frequency']}  "
-              f"lift_mean={best['pairwise_lift_mean']:.4f}  "
-              f"Priority={int(best['Priority'])}  "
-              f"[{best['theoretical_class']}]")
-
-        row_dict = {"Axis": axis_label}
-        row_dict.update({c: best[c] for c in DISPLAY_COLS})
-        row_dict.update({
-            "joint_frequency":   int(best["joint_frequency"]),
-            "pairwise_lift_mean": float(best["pairwise_lift_mean"]),
-            "theoretical_class": best["theoretical_class"],
-            "Priority":          int(best["Priority"]),
-            "combo_label":       best["combo_label"],
-        })
-        rows.append(row_dict)
-
-    df_supp = pd.DataFrame(rows)
-    return df_supp
-
-
-# ══════════════════════════════════════════════════════════════
-# Step 5: 최종 검증 및 요약
+# Step 4: 최종 요약
 # ══════════════════════════════════════════════════════════════
 
 def step5_validate(
     core_df:   pd.DataFrame,
-    supp_df:   pd.DataFrame,
     prev_path: Path | None = None,
 ) -> pd.DataFrame:
-    """Step 5: 교집합 검증 → 최종 요약 테이블 생성."""
+    """Step 4(구 Step 5): 핵심 시나리오 최종 요약 테이블 생성."""
     print("\n" + "=" * 60)
-    print("  [Step 5] 최종 검증")
+    print("  [Step 4] 최종 요약")
     print("=" * 60)
 
-    # 5-1. Core ∩ Supplemental = ∅ 확인
-    core_labels = set(core_df["combo_label"]) if "combo_label" in core_df.columns else set()
-    supp_valid  = supp_df[supp_df["combo_label"] != "-"]
-    supp_labels = set(supp_valid["combo_label"])
-    overlap     = core_labels & supp_labels
-
-    if overlap:
-        print(f"  [경고] Core ∩ Supplemental 중복 발생: {overlap}")
-    else:
-        print("  Core ∩ Supplemental = ∅  ✓")
-
-    # 5-2. Ambiguity 보완 시나리오 경고
-    amb_supp = supp_valid[supp_valid["theoretical_class"] == "Ambiguity"]
-    if not amb_supp.empty:
-        print("\n  [Ambiguity 보완 시나리오]")
-        for _, r in amb_supp.iterrows():
-            print(f"    {r['Axis']}: {r['combo_label']}  "
-                  f"(pairwise_lift_mean={r['pairwise_lift_mean']:.4f})")
-            print(f"      → 최소 1개 변수쌍이 독립 기댓값 미만으로 공동 발생")
-            print(f"      → 축 논리와 정합성 수동 확인 필요")
-
-    # 5-3. 최종 요약 테이블
     final_rows: list[dict] = []
-
-    # Core
     for _, r in core_df.iterrows():
         final_rows.append({
-            "Scenario_ID": f"C{int(r['Rank']):02d}",
-            "Type": "Core", "Axis": "-",
+            "Scenario_ID": f"S{int(r['Rank']):02d}",
             **{c: r[c] for c in DISPLAY_COLS},
-            "joint_frequency":   int(r["joint_frequency"]),
+            "joint_frequency":    int(r["joint_frequency"]),
             "pairwise_lift_mean": round(float(r["pairwise_lift_mean"]), 4),
-            "theoretical_class": r["theoretical_class"],
-            "combo_label":       r["combo_label"],
+            "theoretical_class":  r["theoretical_class"],
+            "combo_label":        r["combo_label"],
         })
-
-    # Supplemental
-    supp_id = 1
-    for _, r in supp_df.iterrows():
-        final_rows.append({
-            "Scenario_ID": f"S{supp_id:02d}",
-            "Type": "Supplemental",
-            "Axis": r["Axis"],
-            **{c: r[c] for c in DISPLAY_COLS},
-            "joint_frequency": int(r["joint_frequency"]) if r["combo_label"] != "-" else 0,
-            "pairwise_lift_mean": (
-                round(float(r["pairwise_lift_mean"]), 4)
-                if not pd.isna(r["pairwise_lift_mean"]) else np.nan
-            ),
-            "theoretical_class": r["theoretical_class"],
-            "combo_label": r["combo_label"],
-        })
-        supp_id += 1
 
     final_df = pd.DataFrame(final_rows)
 
-    print("\n  [최종 시나리오 요약]")
-    _print_table(final_df, ["Scenario_ID", "Type", "Axis"] + DISPLAY_COLS + [
+    print(f"\n  선택된 시나리오: {len(final_df)}개")
+    _print_table(final_df, ["Scenario_ID"] + DISPLAY_COLS + [
         "joint_frequency", "pairwise_lift_mean", "theoretical_class"
     ])
 
-    # 5-4. Diff 테이블 (이전 결과 존재 시)
     if prev_path and prev_path.exists():
         _print_diff(final_df, prev_path)
 
@@ -634,17 +455,7 @@ def _print_table(df: pd.DataFrame, cols: list[str]) -> None:
 # Excel 저장
 # ══════════════════════════════════════════════════════════════
 
-_SCENARIO_COLORS = {
-    "Core":         "C6EFCE",   # 녹색
-    "Supplemental": "DDEBF7",   # 파랑
-    "No candidate": "D9D9D9",   # 회색
-}
-
-_PRIORITY_COLORS = {
-    1: "C6EFCE",
-    2: "FFEB9C",
-    3: "FFC7CE",
-}
+_CLASS_COLORS = {"Possible": "C6EFCE", "Ambiguity": "FFC7CE"}
 
 
 def _style_ws(ws, df: pd.DataFrame, color_col: str, color_map: dict) -> None:
@@ -677,17 +488,12 @@ def _style_ws(ws, df: pd.DataFrame, color_col: str, color_map: dict) -> None:
                 ws.cell(row=ri, column=ci).fill = fill
 
 
-def save_to_excel(
-    core_df:  pd.DataFrame,
-    supp_df:  pd.DataFrame,
-    final_df: pd.DataFrame,
-) -> Path:
-    """Step 3~5 결과를 Excel 3시트로 저장."""
+def save_to_excel(final_df: pd.DataFrame) -> Path:
+    """시나리오 결과를 Excel로 저장."""
     SCENARIO_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path  = SCENARIO_DIR / f"scenario_selection_{timestamp}.xlsx"
 
-    # 이전 결과 CSV (Diff용) 저장
     prev_csv = SCENARIO_DIR / "final_scenarios_latest.csv"
     if prev_csv.exists():
         prev_csv.rename(SCENARIO_DIR / "final_scenarios_prev.csv")
@@ -695,22 +501,12 @@ def save_to_excel(
 
     try:
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
-            core_df.to_excel(writer,  sheet_name="Core Scenarios",        index=False)
-            supp_df.to_excel(writer,  sheet_name="Supplemental Scenarios", index=False)
-            final_df.to_excel(writer, sheet_name="Final Summary",          index=False)
-
-            _style_ws(writer.sheets["Core Scenarios"],        core_df,  "theoretical_class",
-                      {"Possible": "C6EFCE", "Ambiguity": "FFC7CE"})
-            _style_ws(writer.sheets["Supplemental Scenarios"], supp_df, "Priority",
-                      _PRIORITY_COLORS)
-            _style_ws(writer.sheets["Final Summary"],          final_df, "Type",
-                      _SCENARIO_COLORS)
-
+            final_df.to_excel(writer, sheet_name="Scenarios", index=False)
+            _style_ws(writer.sheets["Scenarios"], final_df,
+                      "theoretical_class", _CLASS_COLORS)
     except ImportError:
         with pd.ExcelWriter(str(out_path)) as writer:
-            core_df.to_excel(writer,  sheet_name="Core Scenarios",         index=False)
-            supp_df.to_excel(writer,  sheet_name="Supplemental Scenarios", index=False)
-            final_df.to_excel(writer, sheet_name="Final Summary",           index=False)
+            final_df.to_excel(writer, sheet_name="Scenarios", index=False)
 
     print(f"\n  Excel 저장: {out_path}")
     return out_path
@@ -721,43 +517,48 @@ def save_to_excel(
 # ══════════════════════════════════════════════════════════════
 
 def run_mode_b(
-    diversity_constraint: int   = 2,
-    lift_threshold:       float = 1.0,
-    freq_threshold:       int   = 1,
+    diversity_constraint: int | None = None,
+    lift_threshold:       float      = 1.0,
+    freq_threshold:       int        = 1,
+    include_unobserved:   bool       = False,
 ) -> dict:
-    """저장된 분류 테이블을 기반으로 Step 3~5 실행."""
+    """저장된 분류 테이블을 기반으로 Step 3~5 실행.
+
+    include_unobserved=True: 이론적으로 Possible이지만 관측 빈도=0인 조합도 포함.
+    """
     print("=" * 60)
     print("  [MODE B] 시나리오 선택 (저장된 테이블 사용)")
+    if include_unobserved:
+        print("  (미관측 Possible 조합 포함)")
     print("=" * 60)
 
     df_combo = load_classified_table()
 
+    if include_unobserved and PAIRWISE_JUDGEMENT_PATH.exists():
+        # 이론적 전체 조합 생성 (관측+미관측) 후 Possible 필터
+        df_source = enumerate_all_theoretical_combos(df_combo)
+        used_freq_threshold = 0  # 미관측(freq=0) 포함
+    else:
+        df_source = df_combo
+        used_freq_threshold = freq_threshold
+
     core_df = step3_core(
-        df_combo,
+        df_source,
         diversity_constraint=diversity_constraint,
         lift_threshold=lift_threshold,
-        freq_threshold=freq_threshold,
-    )
-
-    core_labels = set(core_df["combo_label"]) if "combo_label" in core_df.columns else set()
-
-    supp_df = step4_supplemental(
-        df_combo,
-        core_labels=core_labels,
-        lift_threshold=lift_threshold,
+        freq_threshold=used_freq_threshold,
     )
 
     prev_csv = SCENARIO_DIR / "final_scenarios_prev.csv"
     final_df = step5_validate(
-        core_df, supp_df,
+        core_df,
         prev_path=prev_csv if prev_csv.exists() else None,
     )
 
-    out_path = save_to_excel(core_df, supp_df, final_df)
+    out_path = save_to_excel(final_df)
 
     return {
         "core":  core_df,
-        "supp":  supp_df,
         "final": final_df,
         "path":  out_path,
     }
@@ -971,70 +772,37 @@ def run_from_pairs(freq_threshold: int = 1) -> dict:
         "joint_frequency", "pairwise_lift_mean", "theoretical_class"
     ])
 
-    # 4. 한국 특수성 축 태깅
-    core_df = tag_axis_matches(core_df)
-
-    # 4. 결과 출력
-    print("\n" + "=" * 60)
-    print("  [한국 특수성 축 매칭 시나리오]")
-    print("=" * 60)
-    axis_matched = core_df[core_df["matched_axes"] != ""]
-    if axis_matched.empty:
-        print("  (매칭 없음)")
-    else:
-        _print_table(axis_matched, ["Rank"] + DISPLAY_COLS + [
-            "joint_frequency", "pairwise_lift_mean", "matched_axes"
-        ])
-
-    # 5. Excel 저장 (2시트: 전체 Possible / 축 매칭)
+    # 5. Excel 저장
     SCENARIO_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path  = SCENARIO_DIR / f"scenario_from_pairs_{timestamp}.xlsx"
 
     save_cols = ["Rank"] + DISPLAY_COLS + [
         "joint_frequency", "joint_prob", "pairwise_lift_mean",
-        "theoretical_class", "matched_axes", "combo_label",
+        "theoretical_class", "combo_label",
     ]
     save_cols = [c for c in save_cols if c in core_df.columns]
 
     try:
         with pd.ExcelWriter(str(out_path), engine="openpyxl") as writer:
-            core_df[save_cols].to_excel(
-                writer, sheet_name="Possible 전체", index=False
-            )
-            axis_matched[save_cols].to_excel(
-                writer, sheet_name="한국 특수성 매칭", index=False
-            )
-            for sheet_name, df_s in [
-                ("Possible 전체",    core_df[save_cols]),
-                ("한국 특수성 매칭", axis_matched[save_cols]),
-            ]:
-                ws = writer.sheets[sheet_name]
-                _style_ws(ws, df_s, "matched_axes",
-                          {"": "FFFFFF", **{v: "DDEBF7" for v in AXIS_LABELS.values()}})
+            core_df[save_cols].to_excel(writer, sheet_name="Possible 전체", index=False)
+            _style_ws(writer.sheets["Possible 전체"], core_df[save_cols],
+                      "theoretical_class", _CLASS_COLORS)
     except ImportError:
         with pd.ExcelWriter(str(out_path)) as writer:
-            core_df[save_cols].to_excel(
-                writer, sheet_name="Possible 전체", index=False
-            )
-            axis_matched[save_cols].to_excel(
-                writer, sheet_name="한국 특수성 매칭", index=False
-            )
+            core_df[save_cols].to_excel(writer, sheet_name="Possible 전체", index=False)
 
     print(f"\n  Excel 저장: {out_path}")
-    print(f"  전체 Possible: {len(core_df)}개  |  축 매칭: {len(axis_matched)}개")
+    print(f"  전체 Possible: {len(core_df)}개")
 
     # 6. final_scenarios_latest.csv 저장 (시뮬레이터 호환 형식)
     final_df = core_df.copy()
     final_df.insert(0, "Scenario_ID", ["P" + str(r).zfill(2) for r in final_df["Rank"]])
-    final_df.insert(1, "Type", "Pairs")
-    final_df.insert(2, "Axis", final_df.get("matched_axes", ""))
-    csv_cols = ["Scenario_ID", "Type", "Axis"] + DISPLAY_COLS + [
+    csv_cols = ["Scenario_ID"] + DISPLAY_COLS + [
         "joint_frequency", "pairwise_lift_mean", "theoretical_class", "combo_label",
     ]
     csv_cols = [c for c in csv_cols if c in final_df.columns]
 
-    # 이전 CSV 백업 후 덮어쓰기
     prev_csv = SCENARIO_DIR / "final_scenarios_latest.csv"
     if prev_csv.exists():
         prev_csv.rename(SCENARIO_DIR / "final_scenarios_prev.csv")
@@ -1042,8 +810,7 @@ def run_from_pairs(freq_threshold: int = 1) -> dict:
     print(f"  CSV 저장 (시뮬레이터용): {prev_csv}")
 
     return {
-        "possible_all":  core_df,
-        "axis_matched":  axis_matched,
+        "possible_all": core_df,
         "path":          out_path,
     }
 
@@ -1064,7 +831,7 @@ if __name__ == "__main__":
             "미지정 시 자동 감지."
         )
     )
-    parser.add_argument("--diversity", type=int,   default=2,   metavar="N",
+    parser.add_argument("--diversity", type=int,   default=None, metavar="N",
                         help="다양성 제약 (기본값=2)")
     parser.add_argument("--lift",      type=float, default=1.0, metavar="F",
                         help="Lift 임계값 (기본값=1.0)")
@@ -1075,11 +842,37 @@ if __name__ == "__main__":
     parser.add_argument("--B",         type=int,   default=1000,
                         help="Bootstrap 반복 (MODE A 전용, 기본값=1000)")
     args = parser.parse_args()
+    _include_unobserved = False  # 기본값 (--mode 직접 지정 시)
 
-    # 자동 모드 감지
+    # --mode 미지정 시 인터랙티브 메뉴
     if args.mode is None:
-        args.mode = "b" if CLASSIFIED_TABLE_PATH.exists() else "a"
-        print(f"  [자동 모드 감지] MODE {'B' if args.mode == 'b' else 'A'}")
+        table_exists = CLASSIFIED_TABLE_PATH.exists()
+        print("\n" + "=" * 60)
+        print("  ETF 시나리오 선택 파이프라인")
+        print("=" * 60)
+        print(f"  [분류 테이블] {'있음 ✓' if table_exists else '없음 → MODE A 필요'}")
+        print()
+        print("  [1] MODE A  — HMM 레짐 분류 테이블 새로 구축")
+        print("  [2] MODE B  — 저장된 테이블로 Possible 시나리오 선택")
+        print("  [3] pairs   — 쌍별 CSV 판정으로 Possible 전수 선택")
+        print("  [4] all     — 이론적 전체 조합 열거 (관측 여부 무관)")
+        print()
+        _CHOICE_MAP = {"1": "a", "2": "b", "3": "pairs", "4": "all",
+                       "a": "a", "b": "b", "pairs": "pairs", "all": "all"}
+        while True:
+            choice = input("  선택 (1~4 또는 a/b/pairs/all): ").strip().lower()
+            if choice in _CHOICE_MAP:
+                args.mode = _CHOICE_MAP[choice]
+                break
+            print("  잘못된 입력입니다. 다시 입력해주세요.")
+
+        # MODE B일 때 미관측 포함 여부 추가 질문
+        _include_unobserved = False
+        if args.mode in ("b", "a"):
+            print()
+            ans = input("  이론적 Possible이지만 관측 빈도=0인 조합도 포함할까요? (y/N): ").strip().lower()
+            _include_unobserved = ans in ("y", "yes")
+        print()
 
     if args.mode == "a":
         build_classified_table(n_init=args.n_init, B=args.B)
@@ -1087,11 +880,11 @@ if __name__ == "__main__":
             diversity_constraint=args.diversity,
             lift_threshold=args.lift,
             freq_threshold=args.freq,
+            include_unobserved=_include_unobserved,
         )
     elif args.mode == "pairs":
         run_from_pairs(freq_threshold=args.freq)
     elif args.mode == "all":
-        # --mode all 은 이론적 전체 조합이 목적이므로 freq 기본값(1) 무시, 0으로 강제
         freq_all = args.freq if args.freq != 1 else 0
         run_all_combos(freq_threshold=freq_all)
     else:
@@ -1099,4 +892,5 @@ if __name__ == "__main__":
             diversity_constraint=args.diversity,
             lift_threshold=args.lift,
             freq_threshold=args.freq,
+            include_unobserved=_include_unobserved,
         )

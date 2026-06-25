@@ -63,8 +63,8 @@ OUT_BASE       = _ROOT / "results" / "scenario_simulator"
 
 # HMM 변수명 → GAP/KP 외생변수명
 _GAP_EXOG_MAP = {
-    "global_btc_svi": "Search Interest",
-    "Global_RV":      "VIX Volatility",
+    "global_btc_svi": "value",
+    "Global_RV":      "btc_volatility",
 }
 _KP_EXOG_MAP = {
     "btc_volume_btc": "volume_btc",
