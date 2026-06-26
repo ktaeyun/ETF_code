@@ -1,7 +1,15 @@
 """
 KP Threshold-OU 시뮬레이터
 레짐별 OU 모델: 임계값 τ를 기준으로 레짐 분리
-외생변수: volume_btc, KOSPI_Volatility → σ_t에 결합
+
+모델 (레짐 r):
+  σ_t = σ_0^r·exp(δ1^r·vol + δ2^r·kospi + δ3^r·bitcoin_kr)
+  kp[t+1] = kp[t] + κ^r·(μ^r - kp[t]) + σ_t·ε_t
+
+레짐:
+  r=0: |KP_t| ≤ τ
+  r=1:  KP_t > τ
+  r=2:  KP_t < -τ
 """
 
 import numpy as np
@@ -13,7 +21,6 @@ from sklearn.metrics import mean_squared_error
 
 
 def zscore_clip(x: np.ndarray, clip: float = 3.0) -> np.ndarray:
-    """z-score 표준화 후 클리핑"""
     x = np.asarray(x).flatten()
     mean_x = np.mean(x)
     std_x = np.std(x)
@@ -24,17 +31,11 @@ def zscore_clip(x: np.ndarray, clip: float = 3.0) -> np.ndarray:
 
 
 def get_regime(kp_t: float, threshold: float) -> int:
-    """
-    레짐 결정
-    r=0: |KP_t| ≤ τ
-    r=1: KP_t > τ
-    r=2: KP_t < -τ
-    """
     if abs(kp_t) <= threshold:
         return 0
     elif kp_t > threshold:
         return 1
-    else:  # kp_t < -threshold
+    else:
         return 2
 
 
@@ -43,42 +44,25 @@ def fit_ou_regime(
     regime_mask: np.ndarray,
     regime_id: int
 ) -> Dict:
-    """
-    특정 레짐에 대한 OU 파라미터 추정
-    
-    Args:
-        kp_series: KP 시계열
-        regime_mask: 레짐 마스크 (boolean array)
-        regime_id: 레짐 ID (0, 1, 2)
-    
-    Returns:
-        dict: {'kappa': κ, 'mu': μ, 'sigma0': σ0}
-    """
     kp_regime = kp_series[regime_mask]
     if len(kp_regime) < 5:
-        # 레짐 데이터가 부족하면 기본값 반환
         return {'kappa': 0.1, 'mu': np.mean(kp_series), 'sigma0': np.std(kp_series)}
-    
-    # 변화량 계산
+
     delta_kp = np.diff(kp_regime)
     kp_lag = kp_regime[:-1]
-    
+
     if len(delta_kp) < 3:
         return {'kappa': 0.1, 'mu': np.mean(kp_regime), 'sigma0': np.std(delta_kp) if len(delta_kp) > 0 else 0.01}
-    
-    # OLS 추정
+
     X = np.column_stack([np.ones(len(kp_lag)), kp_lag])
     try:
         beta = np.linalg.lstsq(X, delta_kp, rcond=None)[0]
         alpha = beta[0]
         beta_coef = beta[1]
-        
         kappa = -beta_coef
         mu = -alpha / beta_coef if beta_coef != 0 else np.mean(kp_regime)
-        
         if kappa <= 0:
             kappa = 0.1
-        
         residuals = delta_kp - (alpha + beta_coef * kp_lag)
         sigma0 = np.std(residuals)
         if sigma0 <= 0:
@@ -87,8 +71,7 @@ def fit_ou_regime(
         kappa = 0.1
         mu = np.mean(kp_regime)
         sigma0 = np.std(delta_kp) if len(delta_kp) > 0 else 0.01
-    
-    # MLE 미세 조정
+
     def neg_loglik(params):
         k, m, s = params
         if k <= 0 or s <= 0:
@@ -101,7 +84,7 @@ def fit_ou_regime(
             return -loglik
         except:
             return 1e10
-    
+
     try:
         result = minimize(
             neg_loglik,
@@ -113,12 +96,8 @@ def fit_ou_regime(
             kappa, mu, sigma0 = result.x
     except:
         pass
-    
-    return {
-        'kappa': float(kappa),
-        'mu': float(mu),
-        'sigma0': float(sigma0)
-    }
+
+    return {'kappa': float(kappa), 'mu': float(mu), 'sigma0': float(sigma0)}
 
 
 def fit_threshold_ou(
@@ -130,21 +109,6 @@ def fit_threshold_ou(
     clip: float = 3.0,
     regularization: float = 0.01
 ) -> Dict:
-    """
-    Threshold-OU 모델 적합
-
-    Args:
-        kp_series: KP 시계열
-        volume_btc: volume_btc 시계열
-        kospi_vol: KOSPI_Volatility 시계열
-        bitcoin_kr: bitcoin_kr 시계열
-        threshold: 임계값 τ
-        clip: z-score 클리핑 범위
-        regularization: 규제 계수
-
-    Returns:
-        dict: 레짐별 파라미터 및 외생변수 계수
-    """
     kp = np.asarray(kp_series).flatten()
     vol_btc = np.asarray(volume_btc).flatten()
     kospi = np.asarray(kospi_vol).flatten()
@@ -154,25 +118,21 @@ def fit_threshold_ou(
     if len(vol_btc) != T or len(kospi) != T or len(btc_kr) != T:
         raise ValueError("시계열 길이 불일치")
 
-    # 외생변수 전처리: log(volume_btc) 및 표준화
     log_vol_btc = np.log(vol_btc + 1e-8)
     vol_btc_z = zscore_clip(log_vol_btc, clip=clip)
     kospi_z = zscore_clip(kospi, clip=clip)
     bitcoin_kr_z = zscore_clip(btc_kr, clip=clip)
 
-    # 레짐 마스크 생성
     regime_masks = {
         0: np.abs(kp) <= threshold,
         1: kp > threshold,
         2: kp < -threshold
     }
 
-    # 레짐별 OU 파라미터 추정
     params_regime = {}
     for r in [0, 1, 2]:
         params_regime[r] = fit_ou_regime(kp, regime_masks[r], r)
 
-    # 외생변수 계수 추정 (레짐별)
     delta_kp = np.diff(kp)
     kp_lag = kp[:-1]
     vol_btc_lag = vol_btc_z[:-1]
@@ -192,14 +152,12 @@ def fit_threshold_ou(
             delta3_regime[r] = 0.0
             continue
 
-        # 해당 레짐의 예측값 및 잔차
         kappa_r = params_regime[r]['kappa']
         mu_r = params_regime[r]['mu']
         predicted = kappa_r * (mu_r - kp_lag[regime_mask_lag])
         residuals = delta_kp[regime_mask_lag] - predicted
         residuals_abs = np.abs(residuals)
 
-        # log(|잔차|)를 외생변수로 회귀
         X_exog = np.column_stack([
             np.ones(np.sum(regime_mask_lag)),
             vol_btc_lag[regime_mask_lag],
@@ -241,20 +199,6 @@ def select_optimal_threshold(
     threshold_candidates: np.ndarray = None,
     clip: float = 3.0
 ) -> Tuple[float, Dict]:
-    """
-    최적 임계값 선택 (BIC 기준)
-
-    Args:
-        kp_series: KP 시계열
-        volume_btc: volume_btc 시계열
-        kospi_vol: KOSPI_Volatility 시계열
-        bitcoin_kr: bitcoin_kr 시계열
-        threshold_candidates: 임계값 후보 (None이면 자동 생성)
-        clip: z-score 클리핑 범위
-
-    Returns:
-        (최적 임계값, 적합 결과)
-    """
     kp = np.asarray(kp_series).flatten()
 
     if threshold_candidates is None:
@@ -275,8 +219,7 @@ def select_optimal_threshold(
             result = fit_threshold_ou(kp_series, volume_btc, kospi_vol, bitcoin_kr, tau, clip=clip)
 
             kp_arr = np.asarray(kp_series)
-            # 파라미터 수: 각 레짐당 3개 (κ, μ, σ0) + 외생변수 계수 3개 * 3레짐 = 18개
-            n_params = 3 * 3 + 3 * 3  # 18
+            n_params = 3 * 3 + 3 * 3
 
             delta_kp = np.diff(kp_arr)
             kp_lag = kp_arr[:-1]
@@ -312,16 +255,9 @@ def select_optimal_threshold(
 
 
 class KPThresholdOUSimulator:
-    """
-    KP Threshold-OU 시뮬레이터
-    """
+    """KP Threshold-OU 시뮬레이터 (σ_t = σ_0·exp(δ1·vol + δ2·kospi + δ3·bitcoin_kr))"""
 
     def __init__(self, fit_result: Dict, clip: float = 3.0):
-        """
-        Args:
-            fit_result: fit_threshold_ou 또는 select_optimal_threshold의 결과
-            clip: 클리핑 범위
-        """
         self.threshold = fit_result['threshold']
         self.regime_params = fit_result['regime_params']
         self.delta1_regime = fit_result['delta1_regime']
@@ -344,27 +280,12 @@ class KPThresholdOUSimulator:
         bitcoin_kr_future: np.ndarray = None,
         seed: int = None
     ) -> pd.Series:
-        """
-        KP 경로 시뮬레이션
-
-        Args:
-            T: 시뮬레이션 기간
-            kp0: 초기 KP (None이면 레짐 0의 평균 사용)
-            volume_btc_future: 미래 volume_btc 시계열
-            kospi_vol_future: 미래 KOSPI_Volatility 시계열
-            bitcoin_kr_future: 미래 bitcoin_kr 시계열
-            seed: 랜덤 시드
-
-        Returns:
-            pd.Series: 시뮬레이션된 KP 경로 (길이 T)
-        """
         if seed is not None:
             np.random.seed(seed)
 
         kp = np.zeros(T)
         kp[0] = kp0 if kp0 is not None else self.regime_params[0]['mu']
 
-        # volume_btc 표준화
         if volume_btc_future is None:
             vol_btc_z = np.zeros(T)
         else:
@@ -377,7 +298,6 @@ class KPThresholdOUSimulator:
             vol_btc_z = (log_vol_btc - self.vol_btc_mean) / (self.vol_btc_std + 1e-8)
             vol_btc_z = np.clip(vol_btc_z, -self.clip, self.clip)
 
-        # KOSPI_Volatility 표준화
         if kospi_vol_future is None:
             kospi_z = np.zeros(T)
         else:
@@ -389,7 +309,6 @@ class KPThresholdOUSimulator:
             kospi_z = (kospi - self.kospi_mean) / (self.kospi_std + 1e-8)
             kospi_z = np.clip(kospi_z, -self.clip, self.clip)
 
-        # bitcoin_kr 표준화
         if bitcoin_kr_future is None:
             bitcoin_kr_z = np.zeros(T)
         else:
@@ -401,10 +320,8 @@ class KPThresholdOUSimulator:
             bitcoin_kr_z = (btc_kr - self.bitcoin_kr_mean) / (self.bitcoin_kr_std + 1e-8)
             bitcoin_kr_z = np.clip(bitcoin_kr_z, -self.clip, self.clip)
 
-        # Threshold-OU 시뮬레이션
         for t in range(T - 1):
             r = get_regime(kp[t], self.threshold)
-
             kappa_r = self.regime_params[r]['kappa']
             mu_r = self.regime_params[r]['mu']
             sigma0_r = self.regime_params[r]['sigma0']
@@ -412,7 +329,6 @@ class KPThresholdOUSimulator:
             delta2_r = self.delta2_regime[r]
             delta3_r = self.delta3_regime[r]
 
-            # σ_t 계산 (lag 1)
             vol_btc_lag = vol_btc_z[t] if t > 0 else 0.0
             kospi_lag = kospi_z[t] if t > 0 else 0.0
             bitcoin_kr_lag = bitcoin_kr_z[t] if t > 0 else 0.0
@@ -435,21 +351,6 @@ def fit_kp_threshold_ou(
     clip: float = 3.0,
     regularization: float = 0.01
 ) -> KPThresholdOUSimulator:
-    """
-    KP Threshold-OU 모델 적합 및 시뮬레이터 생성
-
-    Args:
-        kp_series: KP 시계열 (Kimchi Premium)
-        volume_btc: volume_btc 시계열
-        kospi_vol: KOSPI_Volatility 시계열
-        bitcoin_kr: bitcoin_kr 시계열
-        threshold: 임계값 (None이면 자동 선택)
-        clip: z-score 클리핑 범위
-        regularization: 규제 계수
-
-    Returns:
-        KPThresholdOUSimulator 인스턴스
-    """
     if threshold is None:
         threshold, fit_result = select_optimal_threshold(
             kp_series, volume_btc, kospi_vol, bitcoin_kr, clip=clip

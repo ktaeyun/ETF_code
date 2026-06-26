@@ -53,8 +53,8 @@ from preprocessing.scenario_generator import (
     scenarios_from_csv,
 )
 from simulator.data_loader import load_gap_exog, load_kp_exog
-from simulator.gap_ou_simulator import fit_gap_ou
-from simulator.kp_threshold_ou_simulator import fit_kp_threshold_ou
+from simulator.gap_ou_simulator import GapOUSimulator
+from simulator.kp_threshold_ou_simulator import KPThresholdOUSimulator
 from simulator.visualizer import create_all_visualizations
 from compare.metrics import calculate_statistical_tests, calculate_all_metrics
 
@@ -171,30 +171,61 @@ def run_single_scenario(
     vol_sc = pd.Series(_align(df_kp_exog_sc["btc_volume_btc"].values,  T_kp))
     kv_sc  = pd.Series(_align(df_kp_exog_sc["VKOSPI_resid"].values,    T_kp))
 
-    # ── 3. GAP 모수 재추정 ─────────────────────────────────────
-    _pr(f"\n  [GAP] 모수 추정 (외생변수: global_btc_svi → SI, Global_RV → VIX)")
-    gap_sim = fit_gap_ou(
-        gap_series=gap_series,
-        si_series=si_sc,
-        vix_series=vix_sc,
+    # ── 3. Base 모수 로드 (고정) ───────────────────────────────
+    _sim_meta_path = _ROOT / "results" / "simulator" / "cache" / "sim_meta.json"
+    if not _sim_meta_path.exists():
+        raise FileNotFoundError(
+            f"Base 시뮬레이터 캐시 없음: {_sim_meta_path}\n"
+            "simulator/main.py 를 먼저 실행하세요."
+        )
+    with open(_sim_meta_path, encoding="utf-8") as _f:
+        _meta = json.load(_f)
+
+    gap_p = _meta["gap_params"]
+    kp_p  = _meta["kp_params"]
+
+    # 정규화 통계는 실제 데이터 기준으로 계산
+    _si_raw      = df_gap_hist["value"].values
+    _vix_raw     = df_gap_hist["btc_volatility"].values
+    _log_vol_raw = np.log(df_kp_hist["volume_btc"].values + 1e-8)
+    _kospi_raw   = df_kp_hist["KOSPI_Volatility"].values
+    _bkr_raw     = df_kp_hist["bitcoin_kr"].values
+
+    gap_sim = GapOUSimulator(
+        kappa=gap_p["kappa"],
+        mu=gap_p["mu"],
+        sigma0=gap_p["sigma0"],
+        delta1=gap_p["delta1"],
+        delta2=gap_p["delta2"],
+        si_mean=float(np.mean(_si_raw)),
+        si_std=float(np.std(_si_raw)),
+        vix_mean=float(np.mean(_vix_raw)),
+        vix_std=float(np.std(_vix_raw)),
         clip=3.0,
-        regularization=0.01,
     )
-    _pr(f"    κ={gap_sim.kappa:.6f}  μ={gap_sim.mu:.6f}  "
+    _pr(f"\n  [GAP] Base 모수 고정  "
+        f"κ={gap_sim.kappa:.6f}  μ={gap_sim.mu:.6f}  "
         f"σ0={gap_sim.sigma0:.6f}  δ1={gap_sim.delta1:.6f}  δ2={gap_sim.delta2:.6f}")
 
-    # ── 4. KP 모수 재추정 ──────────────────────────────────────
-    _pr(f"\n  [KP] 모수 추정 (외생변수: btc_volume_btc, VKOSPI_resid; bitcoin_kr 실제 유지)")
-    kp_sim = fit_kp_threshold_ou(
-        kp_series=kp_series,
-        volume_btc=vol_sc,
-        kospi_vol=kv_sc,
-        bitcoin_kr=bitcoin_kr,
-        threshold=None,
-        clip=3.0,
-        regularization=0.01,
-    )
-    _pr(f"    threshold={kp_sim.threshold:.6f}")
+    # ── 4. Base KP 모수 로드 (고정) ────────────────────────────
+    _kp_rp = kp_p["regime_params"]
+    kp_sim = KPThresholdOUSimulator({
+        "threshold": kp_p["threshold"],
+        "regime_params": {
+            int(r): {"kappa": v["kappa"], "mu": v["mu"], "sigma0": v["sigma0"]}
+            for r, v in _kp_rp.items()
+        },
+        "delta1_regime": {int(r): v["delta1"] for r, v in _kp_rp.items()},
+        "delta2_regime": {int(r): v["delta2"] for r, v in _kp_rp.items()},
+        "delta3_regime": {int(r): v["delta3"] for r, v in _kp_rp.items()},
+        "vol_btc_mean":     float(np.mean(_log_vol_raw)),
+        "vol_btc_std":      float(np.std(_log_vol_raw)),
+        "kospi_mean":       float(np.mean(_kospi_raw)),
+        "kospi_std":        float(np.std(_kospi_raw)),
+        "bitcoin_kr_mean":  float(np.mean(_bkr_raw)),
+        "bitcoin_kr_std":   float(np.std(_bkr_raw)),
+    }, clip=3.0)
+    _pr(f"  [KP]  Base 모수 고정  threshold={kp_sim.threshold:.6f}")
 
     # ── 5. GAP Monte Carlo ─────────────────────────────────────
     _pr(f"\n  [GAP] Monte Carlo (n={n_simulations}, T={T_gap})")
@@ -259,19 +290,22 @@ def run_single_scenario(
         "scenario_id": scenario_id,
         "scenario_regimes": scenario,
         "gap_params": {
-            "kappa": gap_sim.kappa, "mu": gap_sim.mu, "sigma0": gap_sim.sigma0,
-            "delta1": gap_sim.delta1, "delta2": gap_sim.delta2,
+            "kappa":  gap_sim.kappa,
+            "mu":     gap_sim.mu,
+            "sigma0": gap_sim.sigma0,
+            "delta1": gap_sim.delta1,
+            "delta2": gap_sim.delta2,
         },
         "kp_params": {
             "threshold": kp_sim.threshold,
             "regime_params": {
                 str(r): {
-                    "kappa": kp_sim.regime_params[r]["kappa"],
-                    "mu":    kp_sim.regime_params[r]["mu"],
-                    "sigma0":kp_sim.regime_params[r]["sigma0"],
-                    "delta1":kp_sim.delta1_regime[r],
-                    "delta2":kp_sim.delta2_regime[r],
-                    "delta3":kp_sim.delta3_regime[r],
+                    "kappa":  kp_sim.regime_params[r]["kappa"],
+                    "mu":     kp_sim.regime_params[r]["mu"],
+                    "sigma0": kp_sim.regime_params[r]["sigma0"],
+                    "delta1": kp_sim.delta1_regime[r],
+                    "delta2": kp_sim.delta2_regime[r],
+                    "delta3": kp_sim.delta3_regime[r],
                 }
                 for r in [0, 1, 2]
             },
@@ -733,7 +767,7 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             "gap_pit_ks_p":       p["gap_pit_ks_pvalue"],
             # KP 임계값
             "kp_threshold":       p["kp_params"]["threshold"],
-            # KP 레짐별 kappa (레짐0)
+            # KP 레짐별 kappa
             "kp_kappa_r0":        p["kp_params"]["regime_params"]["0"]["kappa"],
             "kp_kappa_r1":        p["kp_params"]["regime_params"]["1"]["kappa"],
             "kp_kappa_r2":        p["kp_params"]["regime_params"]["2"]["kappa"],

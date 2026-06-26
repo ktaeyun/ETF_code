@@ -228,7 +228,7 @@ def main():
     print("\n[GAP-1단계] 데이터 로드")
     df_gap = load_gap_exog(base_dir=base_dir)
     gap_series = df_gap["etf_premium"]
-    si_series = df_gap["value"]
+    si_series  = df_gap["value"]
     vix_series = df_gap["btc_volatility"]
     T_gap = len(gap_series)
     actual_gap = np.asarray(gap_series).flatten()
@@ -239,29 +239,27 @@ def main():
         gap_params_dict = (cached_meta or {}).get("gap_params", {})
         print("\n[GAP-2,3단계] 캐시 로드 (모델 생략)")
         if gap_params_dict:
-            print(f"  κ (kappa): {gap_params_dict.get('kappa', 'N/A')}")
-            print(f"  μ (mu): {gap_params_dict.get('mu', 'N/A')}")
-            print(f"  σ0 (sigma0): {gap_params_dict.get('sigma0', 'N/A')}")
-            print(f"  δ1 (delta1, SI): {gap_params_dict.get('delta1', 'N/A')}")
-            print(f"  δ2 (delta2, VIX): {gap_params_dict.get('delta2', 'N/A')}")
+            print(f"  κ={gap_params_dict.get('kappa','N/A')}  μ={gap_params_dict.get('mu','N/A')}"
+                  f"  σ0={gap_params_dict.get('sigma0','N/A')}")
+            print(f"  δ1={gap_params_dict.get('delta1','N/A')}  δ2={gap_params_dict.get('delta2','N/A')}")
     else:
-        # GAP-2) OU 모델 적합
-        print("\n[GAP-2단계] OU 모델 적합 (외생변수: SI, VIX)")
+        # GAP-2) OU 모델 적합 (μ_t = μ_0 + γ1·SI,  σ_t = σ_0·exp(δ1·RV))
+        print("\n[GAP-2단계] OU 모델 적합 (μ_t: SI 연동, σ_t: RV 연동)")
         gap_sim = fit_gap_ou(
             gap_series=gap_series,
             si_series=si_series,
             vix_series=vix_series,
             clip=3.0,
-            regularization=0.01
+            regularization=0.01,
         )
-        print(f"  κ (kappa): {gap_sim.kappa:.6f}")
-        print(f"  μ (mu): {gap_sim.mu:.6f}")
-        print(f"  σ0 (sigma0): {gap_sim.sigma0:.6f}")
-        print(f"  δ1 (delta1, SI): {gap_sim.delta1:.6f}")
-        print(f"  δ2 (delta2, VIX): {gap_sim.delta2:.6f}")
+        print(f"  κ={gap_sim.kappa:.6f}  μ={gap_sim.mu:.6f}  σ0={gap_sim.sigma0:.6f}")
+        print(f"  δ1={gap_sim.delta1:.6f}  δ2={gap_sim.delta2:.6f}")
         gap_params_dict = {
-            "kappa": gap_sim.kappa, "mu": gap_sim.mu,
-            "sigma0": gap_sim.sigma0, "delta1": gap_sim.delta1, "delta2": gap_sim.delta2,
+            "kappa":  gap_sim.kappa,
+            "mu":     gap_sim.mu,
+            "sigma0": gap_sim.sigma0,
+            "delta1": gap_sim.delta1,
+            "delta2": gap_sim.delta2,
         }
 
         # GAP-3) 몬테카를로 시뮬레이션
@@ -273,7 +271,7 @@ def main():
                 g0=g0,
                 si_future=si_series.values,
                 vix_future=vix_series.values,
-                seed=args.seed + 10000 + i
+                seed=args.seed + 10000 + i,
             )
             all_gap.append(np.asarray(sim_gap).flatten())
         monte_carlo_gap_array = np.array(all_gap)
@@ -335,9 +333,9 @@ def main():
     # KP-1) 데이터 로드
     print("\n[KP-1단계] 데이터 로드")
     df_kp = load_kp_exog(base_dir=base_dir)
-    kp_series = df_kp["Kimchi Premium"]
+    kp_series         = df_kp["Kimchi Premium"]
     volume_btc_series = df_kp["volume_btc"]
-    kospi_vol_series = df_kp["KOSPI_Volatility"]
+    kospi_vol_series  = df_kp["KOSPI_Volatility"]
     bitcoin_kr_series = df_kp["bitcoin_kr"]
     T_kp = len(kp_series)
     actual_kp = np.asarray(kp_series).flatten()
@@ -382,8 +380,8 @@ def main():
             "threshold": kp_sim.threshold,
             "regime_params": {
                 str(r): {
-                    "kappa": kp_sim.regime_params[r]['kappa'],
-                    "mu": kp_sim.regime_params[r]['mu'],
+                    "kappa":  kp_sim.regime_params[r]['kappa'],
+                    "mu":     kp_sim.regime_params[r]['mu'],
                     "sigma0": kp_sim.regime_params[r]['sigma0'],
                     "delta1": kp_sim.delta1_regime[r],
                     "delta2": kp_sim.delta2_regime[r],
@@ -633,8 +631,8 @@ def main():
             "statistical_tests": gap_statistical_tests,
             "validation_metrics": gap_validation_metrics,
             "ou_params": {
-                "kappa": gap_params_dict.get("kappa"),
-                "mu": gap_params_dict.get("mu"),
+                "kappa":  gap_params_dict.get("kappa"),
+                "mu":     gap_params_dict.get("mu"),
                 "sigma0": gap_params_dict.get("sigma0"),
                 "delta1": gap_params_dict.get("delta1"),
                 "delta2": gap_params_dict.get("delta2"),
