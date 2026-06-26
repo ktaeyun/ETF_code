@@ -30,7 +30,6 @@ from simulator.arima_garch_t_nav_simulator import (
 from simulator.gap_ou_simulator import fit_gap_ou
 from simulator.kp_threshold_ou_simulator import fit_kp_threshold_ou
 from simulator.visualizer import create_all_visualizations
-from simulator.wmcr_test import wmcr_pvalue_calibration, compute_wmcr, wmcr_binomial_test
 from compare.metrics import calculate_statistical_tests, calculate_all_metrics
 
 
@@ -205,71 +204,6 @@ def main():
         else:
             print(f"  {name}: {val}")
 
-    # 5-2) WMCR 이항비율 근사 검정 (캘리브레이션 검정)
-    print("\n[5-2단계] WMCR 이항비율 근사 검정")
-    
-    # NAV에 대한 WMCR 검정
-    # 밴드 구성: 각 시점 t에서 몬테카를로 경로의 분위수 사용
-    # 예: 50% 밴드 = [25% 분위수, 75% 분위수], 80% 밴드 = [10% 분위수, 90% 분위수]
-    p_targets_nav = np.array([0.50, 0.80, 0.95])  # 목표 커버리지
-    
-    bands_L_nav = np.zeros((len(p_targets_nav), T))
-    bands_U_nav = np.zeros((len(p_targets_nav), T))
-    
-    for k, p_target in enumerate(p_targets_nav):
-        alpha_band = (1 - p_target) / 2
-        lower_q = alpha_band * 100
-        upper_q = (1 - alpha_band) * 100
-        for t in range(T):
-            bands_L_nav[k, t] = np.percentile(monte_carlo_nav_array[:, t], lower_q)
-            bands_U_nav[k, t] = np.percentile(monte_carlo_nav_array[:, t], upper_q)
-    
-    # 관측 캡처율 계산
-    C_obs_nav = np.zeros(len(p_targets_nav))
-    for k in range(len(p_targets_nav)):
-        I_tk = (bands_L_nav[k, :] <= actual_nav) & (actual_nav <= bands_U_nav[k, :])
-        C_obs_nav[k] = np.mean(I_tk)
-    
-    # 이항비율 근사 검정
-    print("\n[NAV 검정]")
-    wmcr_test_nav = wmcr_binomial_test(
-        T=T,
-        p_targets=p_targets_nav,
-        C_obs=C_obs_nav,
-        alpha=0.05,
-        verbose=True
-    )
-    
-    # 수익률에 대한 WMCR 검정
-    p_targets_ret = np.array([0.50, 0.80, 0.95])
-    
-    bands_L_ret = np.zeros((len(p_targets_ret), T))
-    bands_U_ret = np.zeros((len(p_targets_ret), T))
-    
-    for k, p_target in enumerate(p_targets_ret):
-        alpha_band = (1 - p_target) / 2
-        lower_q = alpha_band * 100
-        upper_q = (1 - alpha_band) * 100
-        for t in range(T):
-            bands_L_ret[k, t] = np.percentile(monte_carlo_returns_array[:, t], lower_q)
-            bands_U_ret[k, t] = np.percentile(monte_carlo_returns_array[:, t], upper_q)
-    
-    # 관측 캡처율 계산
-    C_obs_ret = np.zeros(len(p_targets_ret))
-    for k in range(len(p_targets_ret)):
-        I_tk = (bands_L_ret[k, :] <= actual_returns) & (actual_returns <= bands_U_ret[k, :])
-        C_obs_ret[k] = np.mean(I_tk)
-    
-    # 이항비율 근사 검정
-    print("\n[Returns 검정]")
-    wmcr_test_ret = wmcr_binomial_test(
-        T=T,
-        p_targets=p_targets_ret,
-        C_obs=C_obs_ret,
-        alpha=0.05,
-        verbose=True
-    )
-
     # 6) 시각화 (NAV)
     print("\n[6단계] NAV 시각화")
     create_all_visualizations(
@@ -377,35 +311,6 @@ def main():
         val = v_gap.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
-    
-    # GAP-5-2) WMCR 이항비율 근사 검정
-    print("\n[GAP-5-2단계] WMCR 이항비율 근사 검정")
-    p_targets_gap = np.array([0.50, 0.80, 0.95])
-    
-    bands_L_gap = np.zeros((len(p_targets_gap), T_gap))
-    bands_U_gap = np.zeros((len(p_targets_gap), T_gap))
-    
-    for k, p_target in enumerate(p_targets_gap):
-        alpha_band = (1 - p_target) / 2
-        lower_q = alpha_band * 100
-        upper_q = (1 - alpha_band) * 100
-        for t in range(T_gap):
-            bands_L_gap[k, t] = np.percentile(monte_carlo_gap_array[:, t], lower_q)
-            bands_U_gap[k, t] = np.percentile(monte_carlo_gap_array[:, t], upper_q)
-    
-    C_obs_gap = np.zeros(len(p_targets_gap))
-    for k in range(len(p_targets_gap)):
-        I_tk = (bands_L_gap[k, :] <= actual_gap) & (actual_gap <= bands_U_gap[k, :])
-        C_obs_gap[k] = np.mean(I_tk)
-    
-    print("\n[GAP 검정]")
-    wmcr_test_gap = wmcr_binomial_test(
-        T=T_gap,
-        p_targets=p_targets_gap,
-        C_obs=C_obs_gap,
-        alpha=0.05,
-        verbose=True
-    )
     
     # GAP-6) 시각화
     print("\n[GAP-6단계] 시각화")
@@ -549,35 +454,6 @@ def main():
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
     
-    # KP-5-2) WMCR 이항비율 근사 검정
-    print("\n[KP-5-2단계] WMCR 이항비율 근사 검정")
-    p_targets_kp = np.array([0.50, 0.80, 0.95])
-    
-    bands_L_kp = np.zeros((len(p_targets_kp), T_kp))
-    bands_U_kp = np.zeros((len(p_targets_kp), T_kp))
-    
-    for k, p_target in enumerate(p_targets_kp):
-        alpha_band = (1 - p_target) / 2
-        lower_q = alpha_band * 100
-        upper_q = (1 - alpha_band) * 100
-        for t in range(T_kp):
-            bands_L_kp[k, t] = np.percentile(monte_carlo_kp_array[:, t], lower_q)
-            bands_U_kp[k, t] = np.percentile(monte_carlo_kp_array[:, t], upper_q)
-    
-    C_obs_kp = np.zeros(len(p_targets_kp))
-    for k in range(len(p_targets_kp)):
-        I_tk = (bands_L_kp[k, :] <= actual_kp) & (actual_kp <= bands_U_kp[k, :])
-        C_obs_kp[k] = np.mean(I_tk)
-    
-    print("\n[KP 검정]")
-    wmcr_test_kp = wmcr_binomial_test(
-        T=T_kp,
-        p_targets=p_targets_kp,
-        C_obs=C_obs_kp,
-        alpha=0.05,
-        verbose=True
-    )
-    
     # KP-6) 시각화
     print("\n[KP-6단계] 시각화")
     create_all_visualizations(
@@ -681,35 +557,6 @@ def main():
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
     
-    # 결합-4) WMCR 이항비율 근사 검정
-    print("\n[결합-4단계] WMCR 이항비율 근사 검정")
-    p_targets_combined = np.array([0.50, 0.80, 0.95])
-    
-    bands_L_combined = np.zeros((len(p_targets_combined), min_T))
-    bands_U_combined = np.zeros((len(p_targets_combined), min_T))
-    
-    for k, p_target in enumerate(p_targets_combined):
-        alpha_band = (1 - p_target) / 2
-        lower_q = alpha_band * 100
-        upper_q = (1 - alpha_band) * 100
-        for t in range(min_T):
-            bands_L_combined[k, t] = np.percentile(monte_carlo_combined_array[:, t], lower_q)
-            bands_U_combined[k, t] = np.percentile(monte_carlo_combined_array[:, t], upper_q)
-    
-    C_obs_combined = np.zeros(len(p_targets_combined))
-    for k in range(len(p_targets_combined)):
-        I_tk = (bands_L_combined[k, :] <= actual_combined) & (actual_combined <= bands_U_combined[k, :])
-        C_obs_combined[k] = np.mean(I_tk)
-    
-    print("\n[NAV*(1+GAP) 검정]")
-    wmcr_test_combined = wmcr_binomial_test(
-        T=min_T,
-        p_targets=p_targets_combined,
-        C_obs=C_obs_combined,
-        alpha=0.05,
-        verbose=True
-    )
-    
     # 결합-5) 시각화
     print("\n[결합-5단계] 시각화")
     create_all_visualizations(
@@ -779,36 +626,12 @@ def main():
         "nav": {
             "statistical_tests": statistical_tests,
             "validation_metrics": validation_metrics,
-            "wmcr_test_nav": {
-                "summary_table": wmcr_test_nav['summary_table'].to_dict('records'),
-                "n_acceptable": wmcr_test_nav['n_acceptable'],
-                "n_total": wmcr_test_nav['n_total'],
-                "all_acceptable": wmcr_test_nav['all_acceptable'],
-                "problematic_bands": wmcr_test_nav['problematic_bands'],
-                "summary_text": wmcr_test_nav['summary_text'],
-            },
-            "wmcr_test_returns": {
-                "summary_table": wmcr_test_ret['summary_table'].to_dict('records'),
-                "n_acceptable": wmcr_test_ret['n_acceptable'],
-                "n_total": wmcr_test_ret['n_total'],
-                "all_acceptable": wmcr_test_ret['all_acceptable'],
-                "problematic_bands": wmcr_test_ret['problematic_bands'],
-                "summary_text": wmcr_test_ret['summary_text'],
-            },
             "T": T,
             "S0": S0,
         },
         "gap": {
             "statistical_tests": gap_statistical_tests,
             "validation_metrics": gap_validation_metrics,
-            "wmcr_test": {
-                "summary_table": wmcr_test_gap['summary_table'].to_dict('records'),
-                "n_acceptable": wmcr_test_gap['n_acceptable'],
-                "n_total": wmcr_test_gap['n_total'],
-                "all_acceptable": wmcr_test_gap['all_acceptable'],
-                "problematic_bands": wmcr_test_gap['problematic_bands'],
-                "summary_text": wmcr_test_gap['summary_text'],
-            },
             "ou_params": {
                 "kappa": gap_params_dict.get("kappa"),
                 "mu": gap_params_dict.get("mu"),
@@ -821,14 +644,6 @@ def main():
         "kp": {
             "statistical_tests": kp_statistical_tests,
             "validation_metrics": kp_validation_metrics,
-            "wmcr_test": {
-                "summary_table": wmcr_test_kp['summary_table'].to_dict('records'),
-                "n_acceptable": wmcr_test_kp['n_acceptable'],
-                "n_total": wmcr_test_kp['n_total'],
-                "all_acceptable": wmcr_test_kp['all_acceptable'],
-                "problematic_bands": wmcr_test_kp['problematic_bands'],
-                "summary_text": wmcr_test_kp['summary_text'],
-            },
             "threshold_ou_params": {
                 "threshold": kp_params_dict.get("threshold"),
                 "regime_params": {
@@ -841,14 +656,6 @@ def main():
         "combined": {
             "statistical_tests": combined_statistical_tests,
             "validation_metrics": combined_validation_metrics,
-            "wmcr_test": {
-                "summary_table": wmcr_test_combined['summary_table'].to_dict('records'),
-                "n_acceptable": wmcr_test_combined['n_acceptable'],
-                "n_total": wmcr_test_combined['n_total'],
-                "all_acceptable": wmcr_test_combined['all_acceptable'],
-                "problematic_bands": wmcr_test_combined['problematic_bands'],
-                "summary_text": wmcr_test_combined['summary_text'],
-            },
             "T": min_T,
         },
         "n_simulations": args.n_simulations,
@@ -907,8 +714,6 @@ def main():
             "simulator": sim if not _skip_models else None,
             "statistical_tests": statistical_tests,
             "validation_metrics": validation_metrics,
-            "wmcr_test_nav": wmcr_test_nav,
-            "wmcr_test_returns": wmcr_test_ret,
             "representative_returns": representative_returns,
             "representative_nav": representative_nav,
             "actual_nav": actual_nav,
@@ -920,7 +725,6 @@ def main():
             "simulator": gap_sim if not _skip_models else None,
             "statistical_tests": gap_statistical_tests,
             "validation_metrics": gap_validation_metrics,
-            "wmcr_test": wmcr_test_gap,
             "representative_gap": representative_gap,
             "actual_gap": actual_gap,
             "T": T_gap,
@@ -929,7 +733,6 @@ def main():
             "simulator": kp_sim if not _skip_models else None,
             "statistical_tests": kp_statistical_tests,
             "validation_metrics": kp_validation_metrics,
-            "wmcr_test": wmcr_test_kp,
             "representative_kp": representative_kp,
             "actual_kp": actual_kp,
             "T": T_kp,
@@ -937,7 +740,6 @@ def main():
         "combined": {
             "statistical_tests": combined_statistical_tests,
             "validation_metrics": combined_validation_metrics,
-            "wmcr_test": wmcr_test_combined,
             "representative_combined": representative_combined,
             "actual_combined": actual_combined,
             "T": min_T,

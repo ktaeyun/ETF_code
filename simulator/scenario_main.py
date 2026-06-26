@@ -57,7 +57,6 @@ from simulator.gap_ou_simulator import fit_gap_ou
 from simulator.kp_threshold_ou_simulator import fit_kp_threshold_ou
 from simulator.visualizer import create_all_visualizations
 from compare.metrics import calculate_statistical_tests, calculate_all_metrics
-from simulator.wmcr_test import wmcr_binomial_test
 
 # ── 경로 상수 ─────────────────────────────────────────────────
 SCENARIO_CSV   = _ROOT / "results" / "scenario_selection" / "final_scenarios_latest.csv"
@@ -96,24 +95,6 @@ def _to_serializable(obj):
     except (TypeError, ValueError):
         return str(obj)
 
-
-def _wmcr_bands(mc_array: np.ndarray, actual: np.ndarray,
-                p_targets: np.ndarray) -> dict:
-    """Monte Carlo 경로에서 WMCR 검정 결과 반환."""
-    T = mc_array.shape[1]
-    bands_L = np.zeros((len(p_targets), T))
-    bands_U = np.zeros((len(p_targets), T))
-    for k, p in enumerate(p_targets):
-        a = (1 - p) / 2
-        for t in range(T):
-            bands_L[k, t] = np.percentile(mc_array[:, t], a * 100)
-            bands_U[k, t] = np.percentile(mc_array[:, t], (1 - a) * 100)
-    C_obs = np.array([
-        np.mean((bands_L[k] <= actual) & (actual <= bands_U[k]))
-        for k in range(len(p_targets))
-    ])
-    return wmcr_binomial_test(T=T, p_targets=p_targets, C_obs=C_obs,
-                               alpha=0.05, verbose=False)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -245,8 +226,6 @@ def run_single_scenario(
     rep_kp = np.median(mc_kp, axis=0)
 
     # ── 7. 검증 지표 ───────────────────────────────────────────
-    p_targets = np.array([0.50, 0.80, 0.95])
-
     actual_gap_ch = np.diff(actual_gap)
     mc_gap_ch     = np.diff(mc_gap, axis=1)
     rep_gap_ch    = np.diff(rep_gap)
@@ -257,8 +236,6 @@ def run_single_scenario(
         actual_returns=actual_gap_ch, simulated_returns=rep_gap_ch,
         monte_carlo_nav_paths=mc_gap, monte_carlo_returns_paths=mc_gap_ch,
     )
-    gap_wmcr  = _wmcr_bands(mc_gap, actual_gap, p_targets)
-
     actual_kp_ch = np.diff(actual_kp)
     mc_kp_ch     = np.diff(mc_kp, axis=1)
     rep_kp_ch    = np.diff(rep_kp)
@@ -269,8 +246,6 @@ def run_single_scenario(
         actual_returns=actual_kp_ch, simulated_returns=rep_kp_ch,
         monte_carlo_nav_paths=mc_kp, monte_carlo_returns_paths=mc_kp_ch,
     )
-    kp_wmcr   = _wmcr_bands(mc_kp, actual_kp, p_targets)
-
     _pr(f"\n  [GAP 결과]  WMCR_price={gap_metr.get('wmcr_price', float('nan')):.4f}  "
         f"DTW={gap_metr.get('dtw_price', float('nan')):.4f}  "
         f"PIT-KS p={gap_stat['pit_ks']['ks_pvalue']:.4f}")
@@ -311,8 +286,6 @@ def run_single_scenario(
         },
         "gap_pit_ks_pvalue": float(gap_stat["pit_ks"]["ks_pvalue"]),
         "kp_pit_ks_pvalue":  float(kp_stat["pit_ks"]["ks_pvalue"]),
-        "gap_wmcr_all_acceptable": bool(gap_wmcr["all_acceptable"]),
-        "kp_wmcr_all_acceptable":  bool(kp_wmcr["all_acceptable"]),
     }
     with open(out_dir / "params_and_metrics.json", "w", encoding="utf-8") as f:
         json.dump(_to_serializable(params_out), f, ensure_ascii=False, indent=2)
@@ -359,8 +332,6 @@ def run_single_scenario(
         "kp_metrics":    kp_metr,
         "gap_stat":      gap_stat,
         "kp_stat":       kp_stat,
-        "gap_wmcr":      gap_wmcr,
-        "kp_wmcr":       kp_wmcr,
         "params_out":    params_out,
     }
 
@@ -649,8 +620,6 @@ def _base_row(base: dict) -> dict:
     km  = kp.get("validation_metrics", {})
     gs  = gp.get("statistical_tests", {})
     ks  = kp.get("statistical_tests", {})
-    gw  = gp.get("wmcr_test", {})
-    kw  = kp.get("wmcr_test", {})
 
     return {
         "Scenario_ID":   "Base",
@@ -663,7 +632,6 @@ def _base_row(base: dict) -> dict:
         "gap_dtw_price": gm.get("dtw_price"),
         "gap_pmc":       gm.get("pmc"),
         "gap_pit_ks_p":  gs.get("pit_ks", {}).get("ks_pvalue"),
-        "gap_wmcr_pass": gw.get("all_acceptable"),
         "kp_threshold":  kpp.get("threshold"),
         "kp_kappa_r0":   kpp.get("regime_params", {}).get("0", {}).get("kappa"),
         "kp_kappa_r1":   kpp.get("regime_params", {}).get("1", {}).get("kappa"),
@@ -672,7 +640,6 @@ def _base_row(base: dict) -> dict:
         "kp_dtw_price":  km.get("dtw_price"),
         "kp_pmc":        km.get("pmc"),
         "kp_pit_ks_p":   ks.get("pit_ks", {}).get("ks_pvalue"),
-        "kp_wmcr_pass":  kw.get("all_acceptable"),
     }
 
 
@@ -764,7 +731,6 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             "gap_dtw_price":      p["gap_metrics"].get("dtw_price"),
             "gap_pmc":            p["gap_metrics"].get("pmc"),
             "gap_pit_ks_p":       p["gap_pit_ks_pvalue"],
-            "gap_wmcr_pass":      p["gap_wmcr_all_acceptable"],
             # KP 임계값
             "kp_threshold":       p["kp_params"]["threshold"],
             # KP 레짐별 kappa (레짐0)
@@ -776,7 +742,6 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             "kp_dtw_price":       p["kp_metrics"].get("dtw_price"),
             "kp_pmc":             p["kp_metrics"].get("pmc"),
             "kp_pit_ks_p":        p["kp_pit_ks_pvalue"],
-            "kp_wmcr_pass":       p["kp_wmcr_all_acceptable"],
         })
     df = pd.DataFrame(rows)
     numeric_cols = df.select_dtypes(include=[float, int]).columns
@@ -1029,9 +994,9 @@ def main():
     print(comparison_df[[
         "Scenario_ID",
         "gap_kappa", "gap_mu", "gap_sigma0",
-        "gap_wmcr_price", "gap_pit_ks_p", "gap_wmcr_pass",
+        "gap_wmcr_price", "gap_pit_ks_p",
         "kp_threshold",
-        "kp_wmcr_price", "kp_pit_ks_p", "kp_wmcr_pass",
+        "kp_wmcr_price", "kp_pit_ks_p",
     ]].to_string(index=False))
     print(f"\n  비교 요약 저장: {comparison_path}")
 
