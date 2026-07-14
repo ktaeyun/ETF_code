@@ -11,7 +11,6 @@ from simulator.arima_garch_t_nav_simulator import (
     log_returns_to_nav,
 )
 from simulator.visualizer import create_all_visualizations
-from simulator.wmcr_test import compute_wmcr, wmcr_pvalue_calibration, wmcr_binomial_test
 from simulator.gap_ou_simulator import fit_gap_ou, GapOUSimulator
 from simulator.kp_threshold_ou_simulator import fit_kp_threshold_ou, KPThresholdOUSimulator
 from simulator.data_loader import load_gap_exog, load_kp_exog
