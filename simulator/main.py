@@ -524,7 +524,9 @@ def main():
         # NAV 기준 상대 수익률: (ETF - NAV) / NAV = gap
         simulated_combined_returns_array[i] = (combined_path / nav_path) - 1.0
     
-    representative_combined_returns = (representative_combined / (actual_nav_aligned * scale_factor)) - 1.0
+    # 대표경로 상대수익률: 분자(시뮬 결합 중앙값)와 분모(시뮬 NAV 중앙값)를 모두 시뮬 측으로 통일
+    representative_nav_combined = np.median(monte_carlo_nav_array[:, :min_T] * scale_factor, axis=0)
+    representative_combined_returns = (representative_combined / representative_nav_combined) - 1.0
     
     # 통계적 검정은 수익률 시계열에 대해 수행 (길이 min_T)
     combined_statistical_tests = calculate_statistical_tests(
