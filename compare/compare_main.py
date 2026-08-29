@@ -14,7 +14,8 @@ import json
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from settings import settings
-from simulator.data_loader import load_nav_data, log_returns_to_nav
+from simulator.data_loader import load_nav_data
+from simulator.arima_garch_t_nav_simulator import log_returns_to_nav
 from simulator.visualizer import create_all_visualizations
 from simulator.jump_detector import detect_jumps
 
@@ -54,7 +55,7 @@ def run_model_comparison(n_simulations=5000, selected_models=None):
     results_dir.mkdir(parents=True, exist_ok=True)
     
     # 사용 가능한 모델 목록
-    available_models = ['Heston', 'ARIMA-GARCH']
+    available_models = ['GBM', 'Heston', 'GARCH', 'ARIMA-GARCH', 'Poisson-Gaussian', 'Merton-JD']
     
     # 모델 선택
     if selected_models is None:
@@ -191,7 +192,7 @@ def run_model_comparison(n_simulations=5000, selected_models=None):
                 simulated_returns = simulator.simulate_returns(T, seed=seed)
                 ret_values = simulated_returns.values if hasattr(simulated_returns, 'values') else np.asarray(simulated_returns).flatten()
                 # NAV 역변환: 괴리율 결합·시각화용
-                simulated_nav = log_returns_to_nav(S0, ret_values)
+                simulated_nav = log_returns_to_nav(ret_values, S0)
                 
                 all_simulated_returns_list.append(ret_values)   # 통계적 검정용
                 all_simulated_nav_list.append(simulated_nav)    # 괴리율 결합·시각화용
@@ -258,16 +259,17 @@ def run_model_comparison(n_simulations=5000, selected_models=None):
                     simulated_jump_mask = np.abs(representative_returns) >= jump_result_actual['threshold']
                     jump_times = np.where(simulated_jump_mask)[0]
             
+            # 현행 visualizer는 점프 시점 오버레이를 지원하지 않는다(a07b2f2 리팩터에서 제거).
+            # 플롯 주석일 뿐 통계량에는 영향이 없어 인자를 넘기지 않는다.
             create_all_visualizations(
                 actual_nav=actual_nav_aligned,
                 simulated_nav=representative_nav,
                 actual_returns=returns_series.values,
                 simulated_returns=representative_returns,
-                actual_jump_times=actual_jump_times,
-                simulated_jump_times=jump_times,
-                output_dir=model_dir / 'plots',
+                output_dir=str(model_dir / 'plots'),
                 monte_carlo_nav_paths=monte_carlo_nav_array,
-                monte_carlo_returns_paths=monte_carlo_returns_array
+                monte_carlo_returns_paths=monte_carlo_returns_array,
+                module="nav",
             )
             
             # 5. 결과 저장
