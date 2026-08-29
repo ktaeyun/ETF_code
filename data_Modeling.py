@@ -7,6 +7,7 @@ import glob
 import numpy as np
 import yfinance as yf
 import pyupbit
+from pandas.tseries.holiday import USFederalHolidayCalendar
 
 start_date = datetime(2023, 12, 1)
 analysis_start = datetime(2024, 1, 12)
@@ -118,6 +119,17 @@ print(f"✅ Upbit 거래량 완료: {len(all_df)}행")
 print("\n🧪 병합 시작")
 merged_df = reduce(lambda left, right: pd.merge(left, right, on="Date", how="outer"), chart_data.values())
 merged_df.sort_values("Date", inplace=True)
+
+# ✔️ 거래일 필터를 로그차분보다 먼저 적용
+# outer 병합 인덱스는 blockchain.info(24/7)를 포함한 전체 달력이므로,
+# 필터 없이 shift(1)을 걸면 1 거래일이 아니라 1 달력일 차분이 된다.
+# 그 상태로 하류에서 주말 행을 삭제하면 금->월 수익률이 통째로 소실된다
+# (누적 드리프트의 2/7 손실). data_variables.py:202-213 과 동일한 순서.
+merged_df = merged_df[merged_df["Date"].dt.dayofweek < 5]
+_us_holidays = USFederalHolidayCalendar().holidays(
+    merged_df["Date"].min(), merged_df["Date"].max()
+)
+merged_df = merged_df[~merged_df["Date"].isin(_us_holidays)]
 
 # ✔️ 로그 수익률 및 변동성
 merged_df["Log Return"] = np.log(merged_df["Market Price (USD)"] / merged_df["Market Price (USD)"].shift(1))

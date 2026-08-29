@@ -67,8 +67,15 @@ ETF_KR(t) = NAV(t) x (1 + GAP(t)) x (1 + KP(t))      <- 초기값 10,000원 앵�
 | `data_feature.py` | 수집(1~11) + 보조지표 + 마스터 병합, CLI 형태 | CoinGecko, Upbit, Binance, FRED, BOK |
 | `kp_data.py` | 김치프리미엄 계산: `BTC_KRW / (BTC_USD x USD_KRW) - 1` | 로컬 CSV |
 | `trend/fetch_trends.py` | Google Trends SVI (글로벌 `bitcoin_all_`, 한국 `bitcoin_kr_`) | pytrends |
+| `dataset/make_y_variables.py` | `y_variables.csv` 생성 (`Log Return` 재현 경로) | blockchain.info |
 
 수집 기간(주 분석): **2024-01-12 ~ 2025-05-23**
+
+**`Log Return` 정의** — 거래일 그리드(미국 영업일 − 연방공휴일, 343일)로 **먼저 필터링한 뒤 로그차분**한다.
+BTC는 24/7 거래되므로 전체 달력에서 먼저 로그차분하면 `shift(1)`이 1 거래일이 아니라 1 달력일 차분이 되고,
+이후 주말 행을 제거할 때 금→월 이동이 통째로 사라진다. 필터를 먼저 적용하면 금→월이 하나의 관측치로 보존된다.
+`etf_premium`(= `etf_true/nav_true − 1`)과 `Kimchi Premium`은 수준 비율이라 차분 순서의 영향을 받지 않는다.
+`btc_volatility`(→ `Global_RV`)는 전체 달력에서 RV를 **집계한 뒤** 거래일로 샘플링하므로 동일 이슈가 없다.
 
 ### 2.2 학습 데이터
 
@@ -134,12 +141,16 @@ NAV{Heston, ARIMA-GARCH} x GAP{Heston-SV, OU} 4개 조합으로 `ETF = NAV x (1+
 
 **Base 검증 결과** (`results/simulator/validation_results.json`, T=343)
 
-| 대상 | PIT-KS p | Kupiec p | is_valid | WMCR Price | WMCR Vol | DTW Price | PMC |
-|---|---|---|---|---|---|---|---|
-| NAV | 0.966 | 0.970 | O | 0.438 | 0.184 | 0.086 | 0.472 |
-| GAP | 0.263 | 0.349 | O | 0.047 | 0.774 | 0.136 | 0.460 |
-| KP | 0.904 | 0.243 | O | 0.248 | 0.831 | 0.160 | 0.509 |
-| Combined | 0.354 | 0.652 | O | 0.496 | 0.791 | 0.061 | 0.460 |
+| 대상 | PIT-KS p | Kupiec p | ES tail_error | is_valid | WMCR Price | WMCR Vol | DTW Price | PMC |
+|---|---|---|---|---|---|---|---|---|
+| NAV | 0.979 | 0.652 | +0.00334 | O | 0.187 | 0.208 | 0.062 | 0.472 |
+| GAP | 0.263 | 0.349 | -0.00052 | O | 0.047 | 0.774 | 0.136 | 0.460 |
+| KP | 0.904 | 0.243 | -0.00284 | O | 0.248 | 0.831 | 0.160 | 0.509 |
+| Combined | 0.354 | 0.652 | -0.00144 | O | 0.212 | 0.791 | 0.062 | 0.467 |
+
+`is_valid`는 PIT-KS와 Kupiec의 p-value만으로 판정한다. ES는 p-value 없는 진단 지표(tail_error)라 판정에 포함하지 않는다.
+NAV 적합 모수: mu=0.002538, phi1=-0.494257, theta1=0.427565, omega=3.969064, alpha1=0.070138, beta1=0.610203, nu=4.178673.
+Combined 검정은 양측이 대수적으로 GAP과 같아(`nav x (1+gap) / nav - 1 = gap`) NAV 사양 변경에 반응하지 않는다 — 해석 시 유의.
 
 산출물: `nav/gap/kp/combined_simulation_results.csv`, `korean_etf_price.csv`, `plots/{nav,gap,kp,combined}/`
 
@@ -202,8 +213,8 @@ S05 = 위기 시나리오(고변동성 + KOSPI 극단 + 관심도/거래량 급�
 
 | Scenario | VaR_95 | CVaR_95 | VaR_99 | CVaR_99 | Max_DD_mean | Volatility | Skew | Kurt | p50 | p95 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Base | 5,745 | 4,857 | 4,218 | 3,885 | -0.37 | 442.1 | 2.73 | 14.93 | 14,236 | 37,500 |
-| S05 | 6,150 | 5,103 | 4,223 | 3,822 | -0.38 | 446.4 | **4.36** | **33.08** | 13,956 | 39,054 |
+| Base | 5,951 | 4,679 | 3,794 | 3,508 | -0.41 | 571.7 | 4.00 | 31.80 | 16,612 | 52,261 |
+| S05 | 5,936 | 4,693 | 3,797 | 3,524 | -0.41 | 582.4 | 4.19 | 35.47 | 16,674 | 52,361 |
 
 모수 비교 (`comparison_summary.csv`):
 
@@ -223,21 +234,38 @@ S05 = 위기 시나리오(고변동성 + KOSPI 극단 + 관심도/거래량 급�
 4. Shapiro-Wilk 정규성 검정 -> 만족 시 대응표본 t-검정, 위반 시 Wilcoxon 부호순위(정규근사)
 5. p < 0.05 -> 유의. 다중비교 보정 미적용 (Rothman 1990: 사전 설계된 시나리오이므로 만능귀무가설 부적절)
 
-**결론** (`significance_test/final_verdict_matrix.csv`)
+**판정 기준** — M=100 대응표본에 CRN을 적용하면 SE가 매우 작아져 0.5% 수준의 차이도 p<0.05가 된다
+(실제로 수정 전 계열에서는 8지표 x 9시나리오 = 72개 비교가 전부 유의했다). p-value만으로는 변별이 되지 않으므로
+**유의성과 효과크기를 함께** 본다. 임계값은 지나치게 좁히지 않도록 완만하게 잡았다.
 
-| 지표 | S01 | S02 | S03 | S04 | S05 | S06 | S07 | S08 | S09 |
-|---|---|---|---|---|---|---|---|---|---|
-| CVaR_95 | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| Max_DD_mean | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| Volatility | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| VaR_95 | noise | noise | noise | noise | noise | noise | noise | noise | noise |
-| VaR_99 | noise | noise | noise | noise | noise | noise | noise | noise | noise |
-| CVaR_99 | noise | noise | noise | noise | noise | noise | noise | noise | noise |
-| p5 | noise | noise | noise | noise | noise | noise | noise | noise | noise |
-| p50 | noise | noise | noise | noise | noise | noise | noise | noise | priority |
-| p95 | noise | noise | noise | noise | noise | noise | noise | noise | noise |
+> `priority` = p < 0.05 **그리고** |효과크기| >= 0.25%,  그 외 `noise`
 
--> **시나리오 간 차이는 꼬리 평균(CVaR_95), 최대낙폭, 변동성에서만 유의**하고, 분위수(VaR, p5/p50/p95) 자체에서는 유의하지 않음.
+효과크기 분포에서 CVaR_99(0.50%)와 VaR_95(0.15%) 사이에 자연스러운 간격이 있어 그 사이에 임계값을 두었다.
+0.25%는 8개 지표 중 6개를 `priority`로 남기는 관대한 선이다. 민감도: 0.18~0.25% 구간에서는 아래 표가 그대로이고,
+0.45%까지 올려도 `priority` 지표 구성(6개)은 바뀌지 않는다(일부 시나리오에서 Max_DD_mean·CVaR_99가 빠질 뿐).
+
+**결론** (`significance_test/significance_matrix_flag.csv` + `effect_size_matrix_pct.csv`)
+
+| 지표 | 효과크기(중앙) | S01 | S02 | S03 | S04 | S05 | S06 | S07 | S08 | S09 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Volatility | 2.95% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
+| p50 | 0.92% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
+| VaR_99 | 0.78% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
+| Max_DD_mean | 0.70% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
+| CVaR_95 | 0.53% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
+| CVaR_99 | 0.50% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
+| VaR_95 | 0.15% | noise | noise | noise | noise | noise | noise | noise | noise | noise |
+| p95 | 0.07% | noise | noise | noise | noise | noise | noise | noise | noise | noise |
+
+-> **시나리오 간 차이는 변동성에서 가장 뚜렷하고**(2.95%, 다른 지표의 3배 이상), 중앙값·꼬리 평균(CVaR)·
+최대낙폭·VaR_99에서도 일관되게 나타난다. 반면 **분포 양끝단(VaR_95, p95)에서는 실질적 차이가 없다.**
+9개 시나리오 모두 같은 패턴이라 지표별 판정이 시나리오에 따라 흔들리지 않는다.
+
+`p5`는 산출 정의상 `VaR_95`와 항상 같은 값이라 지표 목록에서 제외했다(8개 지표).
+
+**참고** — 이 표는 `Log Return` 수정(2.1 참조) 이후의 결과다. 수정 전에는 72개 비교가 전부 유의해
+지표 간 변별이 되지 않았고, 수정 후 VaR_95(0.49%→0.15%)와 p95(0.54%→0.07%)의 효과크기가 줄면서
+분포 양끝단이 분리되었다. 수정 전 결과는 `significance_test_preW/`에 보존되어 있다.
 
 ---
 
