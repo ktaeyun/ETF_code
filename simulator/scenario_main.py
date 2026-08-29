@@ -202,10 +202,12 @@ def run_single_scenario(
         vix_mean=float(np.mean(_vix_raw)),
         vix_std=float(np.std(_vix_raw)),
         clip=3.0,
+        nu=gap_p.get("nu"),
     )
     _pr(f"\n  [GAP] Base 모수 고정  "
         f"κ={gap_sim.kappa:.6f}  μ={gap_sim.mu:.6f}  "
-        f"σ0={gap_sim.sigma0:.6f}  δ1={gap_sim.delta1:.6f}  δ2={gap_sim.delta2:.6f}")
+        f"σ0={gap_sim.sigma0:.6f}  δ1={gap_sim.delta1:.6f}  δ2={gap_sim.delta2:.6f}"
+        + (f"  ν={gap_sim.nu:.4f}" if gap_sim.nu is not None else "  (정규 혁신항)"))
 
     # ── 4. Base KP 모수 로드 (고정) ────────────────────────────
     _kp_rp = kp_p["regime_params"]
@@ -295,6 +297,7 @@ def run_single_scenario(
             "sigma0": gap_sim.sigma0,
             "delta1": gap_sim.delta1,
             "delta2": gap_sim.delta2,
+            "nu":     gap_sim.nu,
         },
         "kp_params": {
             "threshold": kp_sim.threshold,

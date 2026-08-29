@@ -63,7 +63,8 @@ def _file_md5(path: Path) -> str:
         return "missing"
 
 
-def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int, seed: int) -> str:
+def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int, seed: int,
+                   gap_dist: str = "t") -> str:
     data_files = [
         Path(base_dir) / "dataset" / "train" / "nav_train.csv",
         Path(base_dir) / "dataset" / "train" / "gap_train_main.csv",
@@ -77,6 +78,8 @@ def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int
     h.update(json.dumps({
         "ar_order": list(ar_order), "S0": S0,
         "n_simulations": n_simulations, "seed": seed,
+        # 혁신항 분포가 바뀌면 GAP 경로가 달라지므로 캐시를 분리해야 한다
+        "gap_dist": gap_dist,
     }, sort_keys=True).encode())
     return h.hexdigest()
 
@@ -136,6 +139,8 @@ def main():
     parser.add_argument("--out-dir", type=str, default=None, help="결과 저장 디렉터리 (기본: results/simulator)")
     parser.add_argument("--no-save", action="store_true", help="파일 저장 안 함")
     parser.add_argument("--no-cache", action="store_true", help="캐시 사용 안 함 (강제 재실행)")
+    parser.add_argument("--gap-dist", choices=["t", "normal"], default="t",
+                        help="GAP OU 혁신항 분포 (기본 t: 실제 괴리율의 두꺼운 꼬리 반영)")
     args = parser.parse_args()
 
     base_dir = args.base_dir or str(_root)
@@ -161,7 +166,7 @@ def main():
     actual_nav = np.asarray(log_returns_to_nav(pd.Series(actual_returns), S0=S0)).flatten()
 
     # 캐시 체크
-    cache_key = _sim_cache_key(base_dir, ar_order, S0, args.n_simulations, args.seed)
+    cache_key = _sim_cache_key(base_dir, ar_order, S0, args.n_simulations, args.seed, args.gap_dist)
     _skip_models = False
     cached_arrs, cached_meta = None, None
     if not args.no_cache:
@@ -267,15 +272,22 @@ def main():
             vix_series=vix_series,
             clip=3.0,
             regularization=0.01,
+            dist=args.gap_dist,
         )
         print(f"  κ={gap_sim.kappa:.6f}  μ={gap_sim.mu:.6f}  σ0={gap_sim.sigma0:.6f}")
         print(f"  δ1={gap_sim.delta1:.6f}  δ2={gap_sim.delta2:.6f}")
+        if gap_sim.nu is not None:
+            print(f"  ν={gap_sim.nu:.4f}  (Student-t 혁신항, 초과첨도 {6/(gap_sim.nu-4):.2f})"
+                  if gap_sim.nu > 4 else f"  ν={gap_sim.nu:.4f}  (Student-t 혁신항, 첨도 무한)")
+        else:
+            print("  혁신항: 정규분포")
         gap_params_dict = {
             "kappa":  gap_sim.kappa,
             "mu":     gap_sim.mu,
             "sigma0": gap_sim.sigma0,
             "delta1": gap_sim.delta1,
             "delta2": gap_sim.delta2,
+            "nu":     gap_sim.nu,
         }
 
         # GAP-3) 몬테카를로 시뮬레이션
@@ -617,6 +629,7 @@ def main():
                 "sigma0": gap_params_dict.get("sigma0"),
                 "delta1": gap_params_dict.get("delta1"),
                 "delta2": gap_params_dict.get("delta2"),
+                "nu":     gap_params_dict.get("nu"),
             },
             "T": T_gap,
         },

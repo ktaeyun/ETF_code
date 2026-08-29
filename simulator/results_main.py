@@ -132,6 +132,7 @@ def _load_fixed_gap_kp_simulators() -> tuple[GapOUSimulator, KPThresholdOUSimula
         vix_mean=float(np.mean(df_gap_hist["btc_volatility"].values)),
         vix_std=float(np.std(df_gap_hist["btc_volatility"].values)),
         clip=3.0,
+        nu=gap_p.get("nu"),
     )
 
     kp_rp = kp_p["regime_params"]
