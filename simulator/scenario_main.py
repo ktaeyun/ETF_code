@@ -277,10 +277,10 @@ def run_single_scenario(
         actual_returns=actual_kp_ch, simulated_returns=rep_kp_ch,
         monte_carlo_nav_paths=mc_kp, monte_carlo_returns_paths=mc_kp_ch,
     )
-    _pr(f"\n  [GAP 결과]  WMCR_price={gap_metr.get('wmcr_price', float('nan')):.4f}  "
+    _pr(f"\n  [GAP 결과]  PICP95={gap_metr.get('picp95_price', float('nan')):.4f}  CovErr={gap_metr.get('coverage_error_price', float('nan')):.4f}  "
         f"DTW={gap_metr.get('dtw_price', float('nan')):.4f}  "
         f"PIT-KS p={gap_stat['pit_ks']['ks_pvalue']:.4f}")
-    _pr(f"  [KP  결과]  WMCR_price={kp_metr.get('wmcr_price', float('nan')):.4f}  "
+    _pr(f"  [KP  결과]  PICP95={kp_metr.get('picp95_price', float('nan')):.4f}  CovErr={kp_metr.get('coverage_error_price', float('nan')):.4f}  "
         f"DTW={kp_metr.get('dtw_price', float('nan')):.4f}  "
         f"PIT-KS p={kp_stat['pit_ks']['ks_pvalue']:.4f}")
 
@@ -662,7 +662,8 @@ def _base_row(base: dict) -> dict:
         "gap_sigma0":    ou.get("sigma0"),
         "gap_delta1_SI": ou.get("delta1"),
         "gap_delta2_VIX":ou.get("delta2"),
-        "gap_wmcr_price":gm.get("wmcr_price"),
+        "gap_picp95":    gm.get("picp95_price"),
+        "gap_cov_err":   gm.get("coverage_error_price"),
         "gap_dtw_price": gm.get("dtw_price"),
         "gap_pmc":       gm.get("pmc"),
         "gap_pit_ks_p":  gs.get("pit_ks", {}).get("ks_pvalue"),
@@ -670,7 +671,8 @@ def _base_row(base: dict) -> dict:
         "kp_kappa_r0":   kpp.get("regime_params", {}).get("0", {}).get("kappa"),
         "kp_kappa_r1":   kpp.get("regime_params", {}).get("1", {}).get("kappa"),
         "kp_kappa_r2":   kpp.get("regime_params", {}).get("2", {}).get("kappa"),
-        "kp_wmcr_price": km.get("wmcr_price"),
+        "kp_picp95":     km.get("picp95_price"),
+        "kp_cov_err":    km.get("coverage_error_price"),
         "kp_dtw_price":  km.get("dtw_price"),
         "kp_pmc":        km.get("pmc"),
         "kp_pit_ks_p":   ks.get("pit_ks", {}).get("ks_pvalue"),
@@ -761,7 +763,8 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             "gap_delta1_SI":      p["gap_params"]["delta1"],
             "gap_delta2_VIX":     p["gap_params"]["delta2"],
             # GAP 검증
-            "gap_wmcr_price":     p["gap_metrics"].get("wmcr_price"),
+            "gap_picp95":         p["gap_metrics"].get("picp95_price"),
+            "gap_cov_err":        p["gap_metrics"].get("coverage_error_price"),
             "gap_dtw_price":      p["gap_metrics"].get("dtw_price"),
             "gap_pmc":            p["gap_metrics"].get("pmc"),
             "gap_pit_ks_p":       p["gap_pit_ks_pvalue"],
@@ -772,7 +775,8 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             "kp_kappa_r1":        p["kp_params"]["regime_params"]["1"]["kappa"],
             "kp_kappa_r2":        p["kp_params"]["regime_params"]["2"]["kappa"],
             # KP 검증
-            "kp_wmcr_price":      p["kp_metrics"].get("wmcr_price"),
+            "kp_picp95":          p["kp_metrics"].get("picp95_price"),
+            "kp_cov_err":         p["kp_metrics"].get("coverage_error_price"),
             "kp_dtw_price":       p["kp_metrics"].get("dtw_price"),
             "kp_pmc":             p["kp_metrics"].get("pmc"),
             "kp_pit_ks_p":        p["kp_pit_ks_pvalue"],
@@ -1028,9 +1032,9 @@ def main():
     print(comparison_df[[
         "Scenario_ID",
         "gap_kappa", "gap_mu", "gap_sigma0",
-        "gap_wmcr_price", "gap_pit_ks_p",
+        "gap_picp95", "gap_cov_err", "gap_pit_ks_p",
         "kp_threshold",
-        "kp_wmcr_price", "kp_pit_ks_p",
+        "kp_picp95", "kp_cov_err", "kp_pit_ks_p",
     ]].to_string(index=False))
     print(f"\n  비교 요약 저장: {comparison_path}")
 

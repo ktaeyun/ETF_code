@@ -113,7 +113,6 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="랜덤 시드")
     parser.add_argument("--out-dir", type=str, default=None, help="결과 저장 디렉터리 (기본: results/simulator)")
     parser.add_argument("--no-save", action="store_true", help="파일 저장 안 함")
-    parser.add_argument("--wmcr-alpha", type=float, default=0.05, help="WMCR 검정 유의수준")
     parser.add_argument("--no-cache", action="store_true", help="캐시 사용 안 함 (강제 재실행)")
     args = parser.parse_args()
 
@@ -186,8 +185,8 @@ def main():
     print(f"  ES: tail_error={es.get('tail_error')}, n_violations={es.get('n_violations')}")
     print(f"  VALID: {statistical_tests['is_valid']}")
 
-    # 5) 검증 지표 (WMCR Price/Vol, DTW, PMC, RVR, VVS, VPR, VJC, TWAD, KS, VaR/ES 등)
-    print("\n[5단계] 검증 지표 계산 (Weighted Multi-band Capture Rate 등)")
+    # 5) 검증 지표 (예측구간 커버리지, DTW, PMC, RVR, VVS, VPR, VJC, TWAD, KS, VaR/ES 등)
+    print("\n[5단계] 검증 지표 계산 (예측구간 커버리지 등)")
     validation_metrics = calculate_all_metrics(
         actual_nav=actual_nav,
         simulated_nav=representative_nav,
@@ -197,7 +196,9 @@ def main():
         monte_carlo_returns_paths=monte_carlo_returns_array,
     )
     v = validation_metrics
-    for name, key in [("WMCR Price", "wmcr_price"), ("WMCR Vol", "wmcr_vol"), ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
+                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
         val = v.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
@@ -294,7 +295,7 @@ def main():
     print(f"  VaR-Kupiec: LR_uc={gap_statistical_tests['kupiec']['lr_uc']:.4f}, p-value={gap_statistical_tests['kupiec']['pvalue']:.4f}")
     print(f"  VALID: {gap_statistical_tests['is_valid']}")
     
-    # GAP-5) 검증 지표 및 WMCR 검정
+    # GAP-5) 검증 지표 및 예측구간 커버리지
     print("\n[GAP-5단계] 검증 지표 계산")
     gap_validation_metrics = calculate_all_metrics(
         actual_nav=actual_gap,
@@ -305,7 +306,9 @@ def main():
         monte_carlo_returns_paths=simulated_gap_changes_array,
     )
     v_gap = gap_validation_metrics
-    for name, key in [("WMCR Price", "wmcr_price"), ("WMCR Vol", "wmcr_vol"), ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
+                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
         val = v_gap.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
@@ -436,7 +439,7 @@ def main():
     print(f"  VaR-Kupiec: LR_uc={kp_statistical_tests['kupiec']['lr_uc']:.4f}, p-value={kp_statistical_tests['kupiec']['pvalue']:.4f}")
     print(f"  VALID: {kp_statistical_tests['is_valid']}")
     
-    # KP-5) 검증 지표 및 WMCR 검정
+    # KP-5) 검증 지표 및 예측구간 커버리지
     print("\n[KP-5단계] 검증 지표 계산")
     kp_validation_metrics = calculate_all_metrics(
         actual_nav=actual_kp,
@@ -447,7 +450,9 @@ def main():
         monte_carlo_returns_paths=simulated_kp_changes_array,
     )
     v_kp = kp_validation_metrics
-    for name, key in [("WMCR Price", "wmcr_price"), ("WMCR Vol", "wmcr_vol"), ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
+                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
         val = v_kp.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
@@ -552,7 +557,9 @@ def main():
         monte_carlo_returns_paths=simulated_combined_returns_array,
     )
     v_combined = combined_validation_metrics
-    for name, key in [("WMCR Price", "wmcr_price"), ("WMCR Vol", "wmcr_vol"), ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
+                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
         val = v_combined.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")

@@ -52,163 +52,79 @@ def dtw_distance(series1, series2):
     return dtw_matrix[n, m] / max(n, m)
 
 
-def wmcr_price(actual_price, simulated_paths, bands=[0.2, 0.3, 0.4, 0.5, 0.6], weights=[5, 4, 3, 2, 1]):
+def interval_coverage(actual, simulated_paths, levels=(0.50, 0.80, 0.95)):
     """
-    Weighted Multi-band Capture Rate (WMCR) Price
-    논문 정의: 시뮬레이션 경로들의 밴드 내에 실제 가격이 들어가는 비율
-    
+    예측구간 커버리지 (PICP, Prediction Interval Coverage Probability)
+
+    각 시점 t에서 몬테카를로 경로의 분위수로 명목 (1-alpha) 예측구간을 구성하고,
+    실제 관측치가 그 구간 안에 들어간 시점의 비율(경험적 커버리지)을 센다.
+    경험적 커버리지가 명목수준에 가까울수록 분포 예측이 잘 보정된 것이다.
+
+    커버리지만 보면 구간을 넓게 잡을수록 유리하므로, 구간폭을 실제 시계열의
+    변동범위로 정규화한 NMPIW를 함께 보고한다(낮을수록 좁고 예리한 구간).
+
     Args:
-        actual_price: 실제 가격 시계열 (T,)
-        simulated_paths: 시뮬레이션 경로들 (N x T 배열)
-        bands: 퍼센트 밴드 리스트 (예: [0.2, 0.3, 0.4, 0.5, 0.6] = 20%, 30%, ...)
-        weights: 각 밴드에 대한 가중치 리스트
-    
+        actual: 실제 시계열 (T,)
+        simulated_paths: 몬테카를로 경로 (N x T)
+        levels: 명목 신뢰수준 리스트
+
     Returns:
-        float: WMCR Price 값 (높을수록 좋음, 0~1)
+        dict:
+            'picp'           {level: 경험적 커버리지}   명목수준에 가까울수록 좋음
+            'coverage_error' mean |경험적 - 명목|        낮을수록 좋음
+            'nmpiw'          {level: 정규화 평균 구간폭} 낮을수록 좋음
     """
-    actual_price = np.array(actual_price)
-    simulated_paths = np.array(simulated_paths)
-    
-    T = len(actual_price)
-    total_score = 0.0
-    total_weight = 0.0
-    
-    for pb, wb in zip(bands, weights):
-        capture_count = 0
-        for t in range(T):
-            # 시뮬레이션 경로들의 min, max
-            min_sim = np.min(simulated_paths[:, t])
-            max_sim = np.max(simulated_paths[:, t])
-            midpoint = (min_sim + max_sim) / 2
-            
-            # 밴드 범위
-            lower_bound = midpoint * (1 - pb)
-            upper_bound = midpoint * (1 + pb)
-            
-            # 실제 가격이 밴드 내에 있는지 확인
-            if lower_bound <= actual_price[t] <= upper_bound:
-                capture_count += 1
-        
-        capture_rate = capture_count / T
-        total_score += wb * capture_rate
-        total_weight += wb
-    
-    return total_score / total_weight if total_weight > 0 else 0.0
+    actual = np.asarray(actual, dtype=float)
+    paths = np.asarray(simulated_paths, dtype=float)
+
+    if paths.ndim != 2:
+        raise ValueError(f"simulated_paths는 (N x T) 2차원이어야 한다: ndim={paths.ndim}")
+
+    T = min(len(actual), paths.shape[1])
+    actual = actual[:T]
+    paths = paths[:, :T]
+
+    valid = np.isfinite(actual)
+    if valid.sum() == 0 or paths.shape[0] == 0:
+        nan_by_level = {lv: np.nan for lv in levels}
+        return {'picp': nan_by_level, 'coverage_error': np.nan, 'nmpiw': dict(nan_by_level)}
+
+    # 구간폭 정규화 기준: 실제 시계열의 변동범위 (0이면 정규화 생략)
+    span = np.nanmax(actual[valid]) - np.nanmin(actual[valid])
+
+    picp, nmpiw, errors = {}, {}, []
+    for lv in levels:
+        alpha = 1.0 - lv
+        lower = np.nanquantile(paths, alpha / 2.0, axis=0)
+        upper = np.nanquantile(paths, 1.0 - alpha / 2.0, axis=0)
+
+        inside = (actual >= lower) & (actual <= upper) & valid
+        emp = inside.sum() / valid.sum()
+
+        picp[lv] = float(emp)
+        errors.append(abs(emp - lv))
+        width = np.nanmean((upper - lower)[valid])
+        nmpiw[lv] = float(width / span) if span > 0 else float('nan')
+
+    return {
+        'picp': picp,
+        'coverage_error': float(np.mean(errors)),
+        'nmpiw': nmpiw,
+    }
 
 
-def wmcr_volatility(actual_vol, simulated_vol_paths, bands=[0.2, 0.3, 0.4, 0.5, 0.6], weights=[5, 4, 3, 2, 1]):
+def coverage_metrics(actual, simulated_paths, prefix, levels=(0.50, 0.80, 0.95)):
     """
-    Weighted Multi-band Capture Rate (WMCR) Volatility
-    논문 정의: 시뮬레이션 변동성 경로들의 밴드 내에 실제 변동성이 들어가는 비율
-    
-    Args:
-        actual_vol: 실제 변동성 시계열 (T,)
-        simulated_vol_paths: 시뮬레이션 변동성 경로들 (N x T 배열)
-        bands: 퍼센트 밴드 리스트
-        weights: 각 밴드에 대한 가중치 리스트
-    
-    Returns:
-        float: WMCR Volatility 값 (높을수록 좋음, 0~1)
+    interval_coverage 결과를 평탄한 지표 dict로 변환한다.
+    예) prefix='price' -> picp50_price, picp80_price, picp95_price,
+                          coverage_error_price, nmpiw95_price
     """
-    return wmcr_price(actual_vol, simulated_vol_paths, bands=bands, weights=weights)
-
-
-def wmcr(series1, series2, benchmark_series=None, window_size=None):
-    """
-    Weighted Mean Cross-Correlation Rate (WMCR) - 구버전 (호환성 유지)
-    기준 대비 스코어: (실제 상관계수 - 기준 상관계수)
-    
-    Args:
-        series1: 시계열 1 (실제 데이터)
-        series2: 시계열 2 (시뮬레이션 데이터)
-        benchmark_series: 기준 시계열 (None이면 series1의 자기상관계수 사용)
-        window_size: 윈도우 크기 (None이면 전체 길이의 10%)
-    
-    Returns:
-        float: WMCR 값 (기준 대비 스코어, 양수=기준 이상, 음수=기준 미만)
-    """
-    s1 = np.array(series1)
-    s2 = np.array(series2)
-    
-    if window_size is None:
-        window_size = max(10, len(s1) // 10)
-    
-    # 실제 상관계수 계산 (series1 vs series2)
-    actual_correlations = []
-    weights = []
-    
-    for i in range(len(s1) - window_size + 1):
-        window1 = s1[i:i+window_size]
-        window2 = s2[i:i+window_size]
-        
-        if np.std(window1) > 0 and np.std(window2) > 0:
-            corr = np.corrcoef(window1, window2)[0, 1]
-            if not np.isnan(corr):
-                actual_correlations.append(corr)
-                # 가중치: 최근 윈도우에 더 높은 가중치
-                weights.append(i + 1)
-    
-    if len(actual_correlations) == 0:
-        return 0.0
-    
-    weights = np.array(weights)
-    weights = weights / weights.sum()
-    actual_wmcr = np.average(actual_correlations, weights=weights)
-    
-    # 기준 상관계수 계산
-    # 기준값: 실제 데이터(series1)의 자기상관계수를 기준으로 사용
-    # 하지만 시뮬레이션 평가에서는 기준값을 더 낮게 설정하는 것이 합리적
-    # (실제 데이터와 시뮬레이션 데이터 간의 상관계수가 자기상관계수보다 낮을 수 있음)
-    from statsmodels.tsa.stattools import acf
-    
-    if benchmark_series is not None:
-        # 기준 시계열과의 상관계수
-        benchmark_correlations = []
-        benchmark_weights = []
-        benchmark_s = np.array(benchmark_series)
-        
-        for i in range(len(s1) - window_size + 1):
-            window1 = s1[i:i+window_size]
-            window_bench = benchmark_s[i:i+window_size]
-            
-            if np.std(window1) > 0 and np.std(window_bench) > 0:
-                corr = np.corrcoef(window1, window_bench)[0, 1]
-                if not np.isnan(corr):
-                    benchmark_correlations.append(corr)
-                    benchmark_weights.append(i + 1)
-        
-        if len(benchmark_correlations) > 0:
-            benchmark_weights = np.array(benchmark_weights)
-            benchmark_weights = benchmark_weights / benchmark_weights.sum()
-            benchmark_wmcr = np.average(benchmark_correlations, weights=benchmark_weights)
-        else:
-            # Fallback: series1의 자기상관계수 사용
-            autocorr = acf(s1, nlags=min(5, len(s1)//4), fft=True)
-            autocorr_mean = np.mean(autocorr[1:]) if len(autocorr) > 1 else 0.5
-            # 기준값을 자기상관계수의 일정 비율로 조정 (예: 0.7배)
-            benchmark_wmcr = autocorr_mean * 0.7
-    else:
-        # 기준값: series1의 자기상관계수 (lag 1-5 평균)
-        # 하지만 시뮬레이션 평가를 위해 기준값을 조정
-        autocorr = acf(s1, nlags=min(5, len(s1)//4), fft=True)
-        autocorr_mean = np.mean(autocorr[1:]) if len(autocorr) > 1 else 0.5
-        
-        # 기준값 설정 옵션:
-        # 1. 자기상관계수 그대로 사용 (너무 높을 수 있음)
-        # 2. 자기상관계수의 일정 비율 사용 (예: 0.6~0.8)
-        # 3. 고정 기준값 사용 (예: 0.3~0.5)
-        
-        # 여기서는 자기상관계수의 0.6배를 기준으로 사용
-        # (실제 데이터와 시뮬레이션 간 상관계수가 자기상관계수보다 낮을 수 있음을 고려)
-        benchmark_wmcr = autocorr_mean * 0.6
-    
-    # WMCR = 실제 상관계수 - 기준 상관계수
-    wmcr_score = actual_wmcr - benchmark_wmcr
-    
-    # 디버깅 정보 (필요시 주석 해제)
-    # print(f"    WMCR 디버깅: actual={actual_wmcr:.4f}, benchmark={benchmark_wmcr:.4f}, score={wmcr_score:.4f}")
-    
-    return wmcr_score
+    cov = interval_coverage(actual, simulated_paths, levels=levels)
+    out = {f'coverage_error_{prefix}': cov['coverage_error']}
+    for lv in levels:
+        out[f'picp{int(round(lv * 100))}_{prefix}'] = cov['picp'][lv]
+    out[f'nmpiw95_{prefix}'] = cov['nmpiw'].get(0.95, float('nan'))
+    return out
 
 
 def pmc(series1, series2):
@@ -650,14 +566,14 @@ def calculate_all_metrics(actual_nav, simulated_nav, actual_returns, simulated_r
     print("  [Price Path Metrics] 계산 중...")
     metrics['dtw_price'] = dtw_distance(actual_nav, simulated_nav)
     
-    # WMCR Price: 몬테카를로 경로가 있으면 논문 정의 사용
+    # 예측구간 커버리지: 몬테카를로 경로가 있어야 산출 가능
     if monte_carlo_nav_paths is not None and len(monte_carlo_nav_paths) > 0:
         if isinstance(monte_carlo_nav_paths, list):
             monte_carlo_nav_paths = np.array(monte_carlo_nav_paths)
-        metrics['wmcr_price'] = wmcr_price(actual_nav, monte_carlo_nav_paths)
+        metrics.update(coverage_metrics(actual_nav, monte_carlo_nav_paths, 'price'))
     else:
-        # 단일 경로인 경우 구버전 사용
-        metrics['wmcr_price'] = wmcr(actual_nav, simulated_nav, benchmark_series=None)
+        # 대표 경로 하나로는 구간을 만들 수 없다
+        metrics.update(coverage_metrics(actual_nav, np.empty((0, len(actual_nav))), 'price'))
     
     metrics['pmc'] = pmc(actual_nav, simulated_nav)
     
@@ -667,16 +583,15 @@ def calculate_all_metrics(actual_nav, simulated_nav, actual_returns, simulated_r
     sim_rv = realized_volatility(simulated_returns)
     metrics['dtw_vol'] = dtw_distance(actual_rv, sim_rv)
     
-    # WMCR Vol: 몬테카를로 경로가 있으면 논문 정의 사용
+    # 변동성 예측구간 커버리지
     if monte_carlo_returns_paths is not None and len(monte_carlo_returns_paths) > 0:
         if isinstance(monte_carlo_returns_paths, list):
             monte_carlo_returns_paths = np.array(monte_carlo_returns_paths)
         # 시뮬레이션 수익률에서 변동성 경로 생성
         sim_vol_paths = np.array([realized_volatility(ret) for ret in monte_carlo_returns_paths])
-        metrics['wmcr_vol'] = wmcr_volatility(actual_rv, sim_vol_paths)
+        metrics.update(coverage_metrics(actual_rv, sim_vol_paths, 'vol'))
     else:
-        # 단일 경로인 경우 구버전 사용
-        metrics['wmcr_vol'] = wmcr(actual_rv, sim_rv, benchmark_series=None)
+        metrics.update(coverage_metrics(actual_rv, np.empty((0, len(actual_rv))), 'vol'))
     
     metrics['rvr'] = rvr(actual_returns, simulated_returns)
     

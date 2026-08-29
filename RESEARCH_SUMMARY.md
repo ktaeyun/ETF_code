@@ -122,12 +122,19 @@ BTC는 24/7 거래되므로 전체 달력에서 먼저 로그차분하면 `shift
 **ETF 조합 검정** — `btc_etf_valid/etf_valid_main.py`
 NAV{Heston, ARIMA-GARCH} x GAP{Heston-SV, OU} 4개 조합으로 `ETF = NAV x (1+gap)` 구성 후 `etf_true`와 대조.
 
-**검증 지표 체계** (`compare/metrics.py`, 974줄)
+**검증 지표 체계** (`compare/metrics.py`, 889줄)
 - 통계 검정: PIT-KS, VaR-Kupiec(LR_uc), ES backtest
 - 경로/분포 지표: DTW, PMC, RVR, VVS, VPR, VJC, TWAD, KS, 분포 적률, VaR/ES proximity
-- **WMCR (Weighted Multi-band Capture Rate)** — 자체 고안 지표, `simulator/WMCR_METHODOLOGY.md`에 방법론 문서화
-  - `WMCR = sum_k w_k * g(C_k, p_k) / sum_k w_k`, `g = 1 - |C_k - p_k|`
-  - p-value는 circular block shift 재표본(B=1000)으로 산출
+- **예측구간 커버리지 (PICP / NMPIW)** — `interval_coverage()`, `coverage_metrics()`
+  - 각 시점 t에서 MC 경로의 분위수로 명목 (1-a) 예측구간을 만들고, 실제값이 그 안에 들어간 시점의 비율을 센다
+  - `PICP_lv` = 경험적 커버리지(명목수준에 가까울수록 좋음), `CovErr` = mean |경험적 - 명목| (낮을수록 좋음)
+  - 커버리지만 보면 구간을 넓게 잡을수록 유리하므로, 구간폭을 실제 변동범위로 정규화한
+    `NMPIW95`를 함께 본다(낮을수록 좁고 예리한 구간). 명목수준 3종(50/80/95%) 사용
+
+> 이전에는 자체 고안 지표 WMCR(Weighted Multi-band Capture Rate)을 썼으나 제거했다.
+> WMCR의 밴드는 `MC 경로 min/max의 중점 +- p%`로 정의되는데, min/max는 표본크기 N에 따라
+> 발산하는 통계량이라 밴드폭이 모델 분포가 아니라 N에 끌려간다. 예측구간 커버리지는
+> 분위수 기반이라 이 문제가 없고, 예측문헌의 표준 관행이라 별도 방법론 정당화가 필요 없다.
 
 ### 2.4 본 모델 (Base) — `simulator/main.py`
 
@@ -141,12 +148,25 @@ NAV{Heston, ARIMA-GARCH} x GAP{Heston-SV, OU} 4개 조합으로 `ETF = NAV x (1+
 
 **Base 검증 결과** (`results/simulator/validation_results.json`, T=343)
 
-| 대상 | PIT-KS p | Kupiec p | ES tail_error | is_valid | WMCR Price | WMCR Vol | DTW Price | PMC |
-|---|---|---|---|---|---|---|---|---|
-| NAV | 0.979 | 0.652 | +0.00334 | O | 0.187 | 0.208 | 0.062 | 0.472 |
-| GAP | 0.263 | 0.349 | -0.00052 | O | 0.047 | 0.774 | 0.136 | 0.460 |
-| KP | 0.904 | 0.243 | -0.00284 | O | 0.248 | 0.831 | 0.160 | 0.509 |
-| Combined | 0.354 | 0.652 | -0.00144 | O | 0.212 | 0.791 | 0.062 | 0.467 |
+| 대상 | PIT-KS p | Kupiec p | ES tail_error | is_valid | DTW Price | PMC |
+|---|---|---|---|---|---|---|
+| NAV | 0.979 | 0.652 | +0.00334 | O | 0.062 | 0.472 |
+| GAP | 0.263 | 0.349 | -0.00052 | O | 0.136 | 0.460 |
+| KP | 0.904 | 0.243 | -0.00284 | O | 0.160 | 0.509 |
+| Combined | 0.354 | 0.652 | -0.00144 | O | 0.062 | 0.467 |
+
+**예측구간 커버리지** (같은 실행, 명목 50/80/95%)
+
+| 대상 | PICP50 | PICP80 | PICP95 | CovErr | NMPIW95 | PICP95(Vol) | CovErr(Vol) |
+|---|---|---|---|---|---|---|---|
+| NAV | 0.741 | 0.921 | 0.994 | **0.135** | **1.860** | 0.974 | 0.035 |
+| GAP | 0.580 | 0.825 | 0.942 | 0.038 | 0.526 | 0.892 | 0.126 |
+| KP | 0.467 | 0.811 | 0.945 | **0.017** | 0.642 | 0.868 | 0.074 |
+| Combined | 0.618 | 0.907 | 0.997 | 0.091 | **1.767** | 0.869 | 0.093 |
+
+KP(0.017)와 GAP(0.038)은 잘 보정돼 있다. **NAV는 과대분산이다** — 명목 50% 구간이 실제로 74%를
+덮고, 95% 구간폭이 실제 시계열 변동범위의 1.86배다. Combined(NMPIW95 = 1.77)가 같은 패턴을
+보이는 것은 NAV에서 상속된 결과이며, 4.4-4의 `sim_std` 26배 문제와 같은 원인으로 보인다.
 
 `is_valid`는 PIT-KS와 Kupiec의 p-value만으로 판정한다. ES는 p-value 없는 진단 지표(tail_error)라 판정에 포함하지 않는다.
 NAV 적합 모수: mu=0.002538, phi1=-0.494257, theta1=0.427565, omega=3.969064, alpha1=0.070138, beta1=0.610203, nu=4.178673.
@@ -218,10 +238,14 @@ S05 = 위기 시나리오(고변동성 + KOSPI 극단 + 관심도/거래량 급�
 
 모수 비교 (`comparison_summary.csv`):
 
-| | gap_kappa | gap_mu | gap_sigma0 | gap_delta1(SI) | gap_delta2(VIX) | gap_wmcr_pass | kp_wmcr_pass |
-|---|---|---|---|---|---|---|---|
-| Base | 0.9149 | 0.000475 | 0.004118 | 0.1136 | -0.0729 | False | True |
-| S05 | 0.9375 | 0.000459 | 0.004157 | 0.0279 | 0.0377 | False | False |
+| | gap_kappa | gap_mu | gap_sigma0 | gap_delta1(SI) | gap_delta2(VIX) |
+|---|---|---|---|---|---|
+| Base | 0.9149 | 0.000475 | 0.004118 | 0.1136 | -0.0729 |
+| S05 | 0.9375 | 0.000459 | 0.004157 | 0.0279 | 0.0377 |
+
+`comparison_summary.csv`의 WMCR 컬럼(`gap_wmcr_pass`/`kp_wmcr_pass`)은 제거됐고
+`gap_picp95`/`gap_cov_err`/`kp_picp95`/`kp_cov_err`로 대체됐다. 위 표의 숫자는
+WMCR 제거 이전 실행 기준이므로, 시나리오 시뮬레이션 재실행 후 갱신이 필요하다.
 
 ### 2.8 유의성 검정 — `simulator/results_main.py` (최신 작업)
 
@@ -338,9 +362,8 @@ echo all | python simulator/results_main.py # M=100 x N=1000, 약 25분
 | `compare/compare_main.py` | `simulator.jump_detector`, `simulator.data_loader.load_nav_data` |
 | `compare/poisson_gaussian_simulator.py` | `simulator.nav_simulator`, `simulator.continuous_component`, `simulator.jump_detector` |
 | `simulator/gbm_regime_simulator.py` | `analysis.scenario_selection` (실제 파일명 `1_scenario_selection.py` — 숫자 접두사라 import 불가) |
-| `simulator/__init__.py` | `__all__`에 삭제된 `compute_wmcr`, `wmcr_pvalue_calibration`, `wmcr_binomial_test` 잔존 |
 
-> 참고: `wmcr_test.py`, `wmcr_test_example.py`, `wmcr_binomial_example.py`는 마지막 커밋(`8b55590`)에서 삭제됨. 방법론 문서 `WMCR_METHODOLOGY.md`만 남고 구현은 `compare/metrics.py` 안에 통합된 상태.
+> 해소됨: `simulator/__init__.py`의 `__all__` 잔존 항목 3개는 WMCR 제거 작업에서 함께 삭제했다.
 
 **결정 필요**: 이 파일들을 (a) 고쳐서 살릴지 (b) 삭제할지
 
@@ -375,8 +398,13 @@ echo all | python simulator/results_main.py # M=100 x N=1000, 약 25분
 1. **시나리오 시뮬레이션 미완** — `results/scenario_simulator/`에 **Base와 S05만** 존재. S01~S04, S06~S09 미실행.
    (단, `significance_test/`는 S01~S09 전체 결과가 있음 — 별도 실행 경로)
 2. **`gbm_regime_simulator` 결과 이상** — `scenario_regime_risk_metrics.csv`에서 P01, P02, P06, P07, P08, P09 6개 시나리오의 `sigma_GAP=0.0903`, `sigma_KP=0.2067`, 모든 리스크 지표가 **완전히 동일**. 레짐 필터가 작동하지 않은 것으로 보임.
-3. **GAP WMCR 미통과** — Base·S05 모두 `gap_wmcr_pass = False` (Base WMCR Price = 0.047)
-4. **Combined 분포 적률 극단값** — `mean_proximity ≈ -381.8`, `sim_std = 0.108` vs `actual_std = 0.0042` (약 26배). NAV 스케일 조정(`scale_factor`) 로직 점검 필요.
+3. ~~**GAP WMCR 미통과**~~ — **해소.** 지표 결함이었다. 예측구간 커버리지로 재측정하니 GAP의
+   `CovErr = 0.038`로 4개 컴포넌트 중 두 번째로 잘 보정돼 있다. WMCR이 낮게 나온 것은
+   밴드를 min/max 중점 기준으로 잡는 정의 탓이지 GAP 모델의 문제가 아니었다(2.3 참조).
+4. **NAV·Combined 과대분산** — Combined `mean_proximity ≈ -381.8`, `sim_std = 0.108` vs
+   `actual_std = 0.0042`(약 26배). 커버리지로 보면 **NAV가 원인**이다(NAV NMPIW95 = 1.86,
+   PICP50 = 0.74 vs 명목 0.50). Combined는 이를 상속한다. NAV 스케일 조정(`scale_factor`)
+   로직 점검 필요. **현재 최우선 항목.**
 5. **`twad = inf`** — NAV/GAP/KP 전 모듈에서 무한대 (Combined만 0.003). 지표 정의상 분모 0 가능성.
 6. **KS 검정 전 모듈 기각** — `ks_pvalue ~ 1e-33` 수준. 대표경로(median) vs 실제 비교라 당연한 결과일 수 있으나 논문 서술 시 해석 필요.
 
@@ -398,6 +426,9 @@ echo all | python simulator/results_main.py # M=100 x N=1000, 약 25분
 | `f14c00a` | 2026-06-26 | **시나리오별 모수 재추정 버전** |
 | `df14167` | 2026-06-26 | **모수 고정 버전** |
 | `8b55590` | 2026-07-14 | `results_main.py` 추가 (유의성 검정), `wmcr_test*.py` 삭제 |
+| `eb97732` | 2026-08-29 | Log Return 주말 손실 수정 (필터 -> 로그차분 순서) |
+| `8da0e0e` | 2026-08-29 | 타 PC 인수인계 체크리스트 (3.1) |
+| (작업중) | 2026-08-29 | **WMCR 전면 제거 -> 예측구간 커버리지(PICP/NMPIW) 대체** |
 
 ---
 
