@@ -21,7 +21,7 @@ if str(_root) not in sys.path:
 import argparse
 import pandas as pd
 
-from simulator.data_loader import load_nav_exog_and_returns, load_gap_exog, load_kp_exog, load_etf_true
+from simulator.data_loader import load_nav_exog_and_returns, load_gap_exog, load_kp_exog
 from simulator.arima_garch_t_nav_simulator import (
     fit_arimax_garch_t,
     log_returns_to_nav,
@@ -471,83 +471,65 @@ def main():
     )
 
     # ============================================================================
-    # NAV*(1+GAP) 결합 시뮬레이션 및 검정
+    # [Step 5] 시뮬레이터 결합 + [Step 6] 통합 시뮬레이터 검증
+    #   ETF_KR(t) = NAV(t) * (1+GAP(t)) * (1+KP(t))
     # ============================================================================
     print("\n" + "=" * 80)
-    print("NAV*(1+GAP) 결합 시뮬레이션 및 검정")
+    print("[Step 5-6] NAV*(1+GAP)*(1+KP) 통합 결합 및 검증")
     print("=" * 80)
-    
-    # 실제 ETF 가격 및 NAV 로드 (etf_true, nav_true)
-    print("\n[결합-1단계] 실제 ETF 가격 및 NAV 로드 (etf_true, nav_true)")
-    y_true_df = load_etf_true(base_dir=base_dir)
-    actual_etf_true = np.asarray(y_true_df["etf_true"]).flatten()
-    actual_nav_true = np.asarray(y_true_df["nav_true"]).flatten()
-    T_etf = len(actual_etf_true)
-    
-    # NAV, GAP, ETF 길이 확인 및 정렬
-    min_T = min(T, T_gap, T_etf)
-    print(f"  데이터 정렬 (T={min_T})")
-    
-    # 실제 관측값: etf_true 사용
-    actual_combined = actual_etf_true[:min_T]
-    actual_nav_true_aligned = actual_nav_true[:min_T]
-    
-    # NAV와 GAP 시뮬레이션 정렬
-    actual_nav_aligned = actual_nav[:min_T]
-    actual_gap_aligned = actual_gap[:min_T]
-    
-    # 시뮬레이션 결합값 계산 (몬테카를로)
-    # 스케일 조정: nav_true의 초기값에 맞춤
-    nav_true_initial = actual_nav_true_aligned[0] if len(actual_nav_true_aligned) > 0 else S0
-    nav_initial = actual_nav_aligned[0] if len(actual_nav_aligned) > 0 else S0
-    scale_factor = nav_true_initial / nav_initial if nav_initial != 0 else 1.0
-    
+
+    min_T = min(T, T_gap, T_kp)
+    print(f"\n[Step 5] 세 컴포넌트 결합 (T={min_T})")
+
+    # 실제 대응물: 한국형 ETF는 아직 존재하지 않으므로
+    # 실제 NAV x (1+실제 GAP) x (1+실제 KP)로 구성한 대리 시계열을 기준으로 삼는다.
+    actual_nav_c = actual_nav[:min_T]
+    actual_gap_c = actual_gap[:min_T]
+    actual_kp_c = actual_kp[:min_T]
+    actual_combined = actual_nav_c * (1.0 + actual_gap_c) * (1.0 + actual_kp_c)
+
+    # 몬테카를로 결합: 경로별로 세 컴포넌트를 곱한다
     monte_carlo_combined_array = np.zeros((args.n_simulations, min_T))
     for i in range(args.n_simulations):
-        nav_path = monte_carlo_nav_array[i, :min_T] * scale_factor  # 스케일 조정
-        gap_path = monte_carlo_gap_array[i, :min_T]
-        monte_carlo_combined_array[i] = nav_path * (1 + gap_path)
-    
+        monte_carlo_combined_array[i] = (
+            monte_carlo_nav_array[i, :min_T]
+            * (1.0 + monte_carlo_gap_array[i, :min_T])
+            * (1.0 + monte_carlo_kp_array[i, :min_T])
+        )
     representative_combined = np.median(monte_carlo_combined_array, axis=0)
-    
-    print(f"  실제 NAV 초기값 (nav_true): {nav_true_initial:.4f}")
-    print(f"  실제 ETF 초기값 (etf_true): {actual_combined[0]:.4f}")
-    print(f"  시뮬 NAV 초기값: {nav_initial:.4f}")
-    print(f"  스케일 조정 계수: {scale_factor:.4f}")
-    
-    # 결합-2) 통계적 검정 (수익률 기준: NAV 기준 상대 수익률)
-    print("\n[결합-2단계] 통계적 검정 (수익률 기준: NAV 기준 상대 수익률)")
-    # 실제: (etf_true[t] - nav_true[t]) / nav_true[t] = etf_true[t] / nav_true[t] - 1
-    actual_combined_returns = (actual_combined / actual_nav_true_aligned) - 1.0
-    
-    # 시뮬레이션: gap_sim과 동일 (nav_sim * (1 + gap_sim) - nav_sim) / nav_sim = gap_sim
-    simulated_combined_returns_array = np.zeros((args.n_simulations, min_T))
-    for i in range(args.n_simulations):
-        nav_path = monte_carlo_nav_array[i, :min_T] * scale_factor
-        gap_path = monte_carlo_gap_array[i, :min_T]
-        combined_path = nav_path * (1 + gap_path)
-        # NAV 기준 상대 수익률: (ETF - NAV) / NAV = gap
-        simulated_combined_returns_array[i] = (combined_path / nav_path) - 1.0
-    
-    # 대표경로 상대수익률: 분자(시뮬 결합 중앙값)와 분모(시뮬 NAV 중앙값)를 모두 시뮬 측으로 통일
-    representative_nav_combined = np.median(monte_carlo_nav_array[:, :min_T] * scale_factor, axis=0)
-    representative_combined_returns = (representative_combined / representative_nav_combined) - 1.0
-    
-    # 통계적 검정은 수익률 시계열에 대해 수행 (길이 min_T)
+
+    print(f"  실제 결합 초기값: {actual_combined[0]:.4f}, 종료값: {actual_combined[-1]:.4f}")
+    print(f"  시뮬 중앙값 초기: {representative_combined[0]:.4f}, 종료: {representative_combined[-1]:.4f}")
+
+    # ------------------------------------------------------------------
+    # [Step 6] 통합 검증 — 결합 가격의 로그수익률 기준
+    #
+    # NAV 기준 상대수익률 (ETF/NAV - 1)을 쓰면 대수적으로 GAP과 같아져
+    # (nav*(1+gap)/nav - 1 = gap) NAV·KP 사양 변화에 반응하지 않는다.
+    # 결합 가격 자체의 로그수익률을 쓰면
+    #   d log ETF = d log NAV + d log(1+GAP) + d log(1+KP)
+    # 이므로 세 컴포넌트가 모두 검정에 반영된다.
+    # ------------------------------------------------------------------
+    print("\n[Step 6] 통계적 검정 (결합 가격 로그수익률 기준)")
+
+    actual_combined_returns = np.diff(np.log(actual_combined))
+    simulated_combined_returns_array = np.diff(np.log(monte_carlo_combined_array), axis=1)
+    representative_combined_returns = np.diff(np.log(representative_combined))
+
     combined_statistical_tests = calculate_statistical_tests(
         actual_returns=actual_combined_returns,
         simulated_returns_paths=simulated_combined_returns_array,
         alpha=0.05,
     )
-    
+
     print(f"  PIT-KS: statistic={combined_statistical_tests['pit_ks']['ks_statistic']:.4f}, p-value={combined_statistical_tests['pit_ks']['ks_pvalue']:.4f}")
     print(f"  VaR-Kupiec: LR_uc={combined_statistical_tests['kupiec']['lr_uc']:.4f}, p-value={combined_statistical_tests['kupiec']['pvalue']:.4f}, exceedance_rate={combined_statistical_tests['kupiec']['exceedance_rate']:.4f}")
     es_combined = combined_statistical_tests['es']
     print(f"  ES: tail_error={es_combined.get('tail_error')}, n_violations={es_combined.get('n_violations')}")
     print(f"  VALID: {combined_statistical_tests['is_valid']}")
-    
-    # 결합-3) 검증 지표 (가격 경로 기준)
-    print("\n[결합-3단계] 검증 지표 계산 (가격 경로 기준)")
+
+    # 보조 진단: 예측구간 커버리지
+    print("\n[Step 6-보조] 검증 지표 계산 (예측구간 커버리지 등)")
     combined_validation_metrics = calculate_all_metrics(
         actual_nav=actual_combined,
         simulated_nav=representative_combined,
@@ -563,9 +545,9 @@ def main():
         val = v_combined.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
-    
-    # 결합-5) 시각화
-    print("\n[결합-5단계] 시각화")
+
+    # 시각화
+    print("\n[Step 6-보조] 시각화")
     create_all_visualizations(
         actual_nav=actual_combined,
         simulated_nav=representative_combined,
@@ -578,31 +560,21 @@ def main():
     )
 
     # ============================================================================
-    # 한국형 비트코인 ETF 가격: NAV*(1+GAP)*(1+KP), 초기 10,000원 앵커링
+    # [Step 7] KR Spot Bitcoin ETF 가격 경로 생성 (초기 10,000원 앵커링)
+    #   Step 5에서 만든 결합 경로를 앵커링만 한다 (재계산하지 않음)
     # ============================================================================
     print("\n" + "=" * 80)
-    print("한국형 비트코인 ETF 가격 (NAV*(1+GAP)*(1+KP), 10,000원 앵커)")
+    print("[Step 7] KR Spot Bitcoin ETF 가격 경로 (10,000원 앵커)")
     print("=" * 80)
     ANCHOR_KRW = 10000.0
-    min_T_korean = min(T, T_gap, T_kp)
-    actual_nav_k = actual_nav[:min_T_korean]
-    actual_gap_k = actual_gap[:min_T_korean]
-    actual_kp_k = actual_kp[:min_T_korean]
-    # 결합: NAV * (1+GAP) * (1+KP)
-    korean_etf_raw = actual_nav_k * (1.0 + actual_gap_k) * (1.0 + actual_kp_k)
-    korean_etf_actual = korean_etf_raw * (ANCHOR_KRW / korean_etf_raw[0]) if korean_etf_raw[0] != 0 else korean_etf_raw
+    min_T_korean = min_T
 
-    # 몬테카를로: 각 경로 NAV*(1+GAP)*(1+KP) 후 10,000원 앵커
-    monte_carlo_korean_etf = np.zeros((args.n_simulations, min_T_korean))
-    for i in range(args.n_simulations):
-        nav_p = monte_carlo_nav_array[i, :min_T_korean]
-        gap_p = monte_carlo_gap_array[i, :min_T_korean]
-        kp_p = monte_carlo_kp_array[i, :min_T_korean]
-        path_raw = nav_p * (1.0 + gap_p) * (1.0 + kp_p)
-        if path_raw[0] != 0:
-            monte_carlo_korean_etf[i] = path_raw * (ANCHOR_KRW / path_raw[0])
-        else:
-            monte_carlo_korean_etf[i] = path_raw
+    def _anchor(path):
+        return path * (ANCHOR_KRW / path[0]) if path[0] != 0 else path
+
+    korean_etf_actual = _anchor(actual_combined)
+    monte_carlo_korean_etf = np.vstack([_anchor(monte_carlo_combined_array[i])
+                                        for i in range(args.n_simulations)])
     korean_etf_representative = np.median(monte_carlo_korean_etf, axis=0)
     korean_etf_p5 = np.percentile(monte_carlo_korean_etf, 5, axis=0)
     korean_etf_p95 = np.percentile(monte_carlo_korean_etf, 95, axis=0)
@@ -697,13 +669,13 @@ def main():
         })
         kp_results_df.to_csv(out_dir / "kp_simulation_results.csv", index=False, encoding="utf-8-sig")
         
-        # NAV*(1+GAP) 결합 결과 저장
-        # actual_combined_returns와 representative_combined_returns는 이미 길이 min_T
+        # [Step 5-7] 통합 결합 결과 저장
+        # 로그수익률은 차분이라 길이가 min_T-1 이므로 앞에 0을 채워 가격 계열과 맞춘다
         combined_results_df = pd.DataFrame({
             "actual_combined": actual_combined,
             "simulated_combined": representative_combined,
-            "actual_combined_returns": actual_combined_returns,
-            "simulated_combined_returns": representative_combined_returns,
+            "actual_combined_returns": np.concatenate([[0], actual_combined_returns]),
+            "simulated_combined_returns": np.concatenate([[0], representative_combined_returns]),
         })
         combined_results_df.to_csv(out_dir / "combined_simulation_results.csv", index=False, encoding="utf-8-sig")
         
