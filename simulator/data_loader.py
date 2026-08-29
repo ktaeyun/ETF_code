@@ -4,7 +4,6 @@ NAV/GAP/KP 시뮬레이터용 데이터 로더
 - Date 기준으로 병합
 """
 
-import numpy as np
 import pandas as pd
 from pathlib import Path
 
@@ -59,47 +58,6 @@ def load_nav_exog_and_returns(
     )
     merged = merged.sort_values("Date").reset_index(drop=True)
     return merged
-
-
-def load_nav_data(base_dir: str = None, S0: float = 100.0):
-    """
-    모형 후보 비교(compare/, Step 3)용 NAV 시계열 로더.
-
-    Step 3의 모형 선택 근거는 Step 4 본모델과 같은 데이터 위에서 나와야 하므로,
-    load_nav_exog_and_returns()가 읽는 것과 동일한 `Log Return`(거래일 그리드로
-    필터링한 뒤 로그차분한 계열)을 쓴다. 과거 구현은 y_true_variables의 `nav_true`를
-    직접 로그차분했는데, 그 경로는 커밋 eb97732에서 고친 주말 수익률 손실 문제를
-    그대로 안고 있었다.
-
-    Args:
-        base_dir: 프로젝트 루트
-        S0: 초기 NAV (simulator/main.py 기본값과 동일하게 100.0)
-
-    Returns:
-        tuple: (nav_series, returns_series) — 둘 다 Date 인덱스를 갖는 pd.Series
-    """
-    from simulator.arima_garch_t_nav_simulator import log_returns_to_nav
-
-    df = load_nav_exog_and_returns(base_dir=base_dir)
-    df = df.dropna(subset=["Log Return"]).reset_index(drop=True)
-
-    idx = pd.to_datetime(df["Date"])
-    returns_series = pd.Series(df["Log Return"].to_numpy(dtype=float), index=idx, name="log_return")
-
-    # nav_series는 returns_series보다 한 점 길다(S0, S1, ..., ST).
-    # 호출부(compare_main)가 S0 = nav_series.iloc[0],
-    # actual_nav_aligned = nav_series.iloc[1:] 로 쓰는 계약을 따른다.
-    nav_path = np.asarray(log_returns_to_nav(returns_series, S0=S0)).flatten()
-    nav_idx = idx.iloc[:1] - (idx.iloc[1] - idx.iloc[0]) if len(idx) > 1 else idx.iloc[:1]
-    nav_series = pd.Series(
-        np.concatenate([[S0], nav_path]),
-        index=pd.DatetimeIndex(list(nav_idx) + list(idx)), name="nav",
-    )
-
-    print("NAV 데이터 로드 (Step 3 비교용, Step 4와 동일 계열)")
-    print(f"  - 수익률 샘플 수: {len(returns_series)}, NAV 샘플 수: {len(nav_series)}")
-    print(f"  - 기간: {idx.iloc[0].date()} ~ {idx.iloc[-1].date()}")
-    return nav_series, returns_series
 
 
 def load_gap_exog(

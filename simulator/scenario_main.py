@@ -56,7 +56,7 @@ from simulator.data_loader import load_gap_exog, load_kp_exog
 from simulator.gap_ou_simulator import GapOUSimulator
 from simulator.kp_threshold_ou_simulator import KPThresholdOUSimulator
 from simulator.visualizer import create_all_visualizations
-from compare.metrics import calculate_statistical_tests, calculate_all_metrics
+from simulator.metrics import calculate_statistical_tests, calculate_all_metrics
 
 # ── 경로 상수 ─────────────────────────────────────────────────
 SCENARIO_CSV   = _ROOT / "results" / "scenario_selection" / "final_scenarios_latest.csv"

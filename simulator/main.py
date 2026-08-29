@@ -30,7 +30,7 @@ from simulator.arima_garch_t_nav_simulator import (
 from simulator.gap_ou_simulator import fit_gap_ou
 from simulator.kp_threshold_ou_simulator import fit_kp_threshold_ou
 from simulator.visualizer import create_all_visualizations
-from compare.metrics import calculate_statistical_tests, calculate_all_metrics
+from simulator.metrics import calculate_statistical_tests, calculate_all_metrics
 
 
 def _to_serializable(obj):
