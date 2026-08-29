@@ -104,6 +104,28 @@ def _load_sim_cache(cache_dir: Path, key: str):
     return arrs, meta
 
 
+def _print_coverage(m):
+    """예측구간 커버리지 출력. 판정은 명목수준이 아니라 모형 내재 기준분포의 백분위로 한다."""
+    for label, key, pct_key in [
+        ("PICP50 ", "picp50_price", "picp50_pct_price"),
+        ("PICP95 ", "picp95_price", "picp95_pct_price"),
+        ("CovErr ", "coverage_error_price", "coverage_error_pct_price"),
+    ]:
+        val, pct = m.get(key), m.get(pct_key)
+        if not isinstance(val, (int, float)):
+            continue
+        if isinstance(pct, (int, float)) and np.isfinite(pct):
+            verdict = "정상" if 5.0 <= pct <= 95.0 else "이상"
+            print(f"  {label}: {val:7.4f}   모형 기준분포의 {pct:5.1f} 백분위  [{verdict}]")
+        else:
+            print(f"  {label}: {val:7.4f}")
+    for label, key in [("NMPIW95", "nmpiw95_price"), ("PICP95 Vol", "picp95_vol"),
+                       ("CovErr Vol", "coverage_error_vol")]:
+        val = m.get(key)
+        if isinstance(val, (int, float)):
+            print(f"  {label}: {val:7.4f}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="NAV ARIMAX-GARCH-t 시뮬레이터 (검증·시각화 포함)")
     parser.add_argument("--base-dir", type=str, default=None, help="프로젝트 루트")
@@ -196,14 +218,7 @@ def main():
         monte_carlo_returns_paths=monte_carlo_returns_array,
     )
     v = validation_metrics
-    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
-                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
-        val = v.get(key)
-        if isinstance(val, (int, float)):
-            print(f"  {name}: {val:.4f}")
-        else:
-            print(f"  {name}: {val}")
+    _print_coverage(v)
 
     # 6) 시각화 (NAV)
     print("\n[6단계] NAV 시각화")
@@ -306,12 +321,7 @@ def main():
         monte_carlo_returns_paths=simulated_gap_changes_array,
     )
     v_gap = gap_validation_metrics
-    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
-                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
-        val = v_gap.get(key)
-        if isinstance(val, (int, float)):
-            print(f"  {name}: {val:.4f}")
+    _print_coverage(v_gap)
     
     # GAP-6) 시각화
     print("\n[GAP-6단계] 시각화")
@@ -450,12 +460,7 @@ def main():
         monte_carlo_returns_paths=simulated_kp_changes_array,
     )
     v_kp = kp_validation_metrics
-    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
-                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
-        val = v_kp.get(key)
-        if isinstance(val, (int, float)):
-            print(f"  {name}: {val:.4f}")
+    _print_coverage(v_kp)
     
     # KP-6) 시각화
     print("\n[KP-6단계] 시각화")
@@ -539,12 +544,7 @@ def main():
         monte_carlo_returns_paths=simulated_combined_returns_array,
     )
     v_combined = combined_validation_metrics
-    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
-                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
-        val = v_combined.get(key)
-        if isinstance(val, (int, float)):
-            print(f"  {name}: {val:.4f}")
+    _print_coverage(v_combined)
 
     # 시각화
     print("\n[Step 6-보조] 시각화")

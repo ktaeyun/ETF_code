@@ -74,18 +74,106 @@ def interval_coverage(actual, simulated_paths, levels=(0.50, 0.80, 0.95)):
     }
 
 
-def coverage_metrics(actual, simulated_paths, prefix, levels=(0.50, 0.80, 0.95)):
+def coverage_metrics(actual, simulated_paths, prefix, levels=(0.50, 0.80, 0.95),
+                     with_reference=True):
     """
     interval_coverage 결과를 평탄한 지표 dict로 변환한다.
     예) prefix='price' -> picp50_price, picp80_price, picp95_price,
                           coverage_error_price, nmpiw95_price
+
+    with_reference=True면 coverage_reference로 모형 내재 기준분포를 구해
+    각 값이 그 분포의 몇 백분위인지(`*_pct_*`)를 함께 낸다. 단일 경로의 PICP는
+    명목수준과 직접 비교할 수 없으므로(coverage_reference 설명 참조), 판정은
+    반드시 이 백분위로 해야 한다. 5~95 백분위 안이면 모형과 모순되지 않는다.
     """
     cov = interval_coverage(actual, simulated_paths, levels=levels)
     out = {f'coverage_error_{prefix}': cov['coverage_error']}
     for lv in levels:
         out[f'picp{int(round(lv * 100))}_{prefix}'] = cov['picp'][lv]
     out[f'nmpiw95_{prefix}'] = cov['nmpiw'].get(0.95, float('nan'))
+
+    if with_reference:
+        paths = np.asarray(simulated_paths, dtype=float)
+        if paths.ndim == 2 and paths.shape[0] >= 2:
+            ref = coverage_reference(paths, levels=levels)
+            for lv in levels:
+                out[f'picp{int(round(lv * 100))}_pct_{prefix}'] = coverage_percentile(
+                    cov['picp'][lv], ref['picp'][lv])
+            out[f'coverage_error_pct_{prefix}'] = coverage_percentile(
+                cov['coverage_error'], ref['coverage_error'])
+        else:
+            for lv in levels:
+                out[f'picp{int(round(lv * 100))}_pct_{prefix}'] = float('nan')
+            out[f'coverage_error_pct_{prefix}'] = float('nan')
     return out
+
+
+def coverage_reference(simulated_paths, levels=(0.50, 0.80, 0.95), n_ref=200, seed=42):
+    """
+    커버리지의 모형 내재 기준분포 (사후예측검정)
+
+    경로 하나에서 잰 PICP를 명목수준과 직접 비교하면 안 된다. 가격 경로는
+    자기상관이 강해 유효표본이 T가 아니라 사실상 몇 개뿐이고, 그래서 단일
+    경로의 PICP는 분산이 매우 크고 오른쪽으로 크게 치우친다. 실제로 모형이
+    옳을 때조차 명목 50% 구간의 PICP 중앙값은 0.5가 아니라 0.55 근처다.
+
+    이 함수는 '모형이 옳다'는 전제에서 단일 경로의 커버리지가 어떤 분포를
+    갖는지 구한다. 시뮬레이션 경로 하나를 관측치인 척 놓고 나머지가 만든
+    밴드에 대해 커버리지를 재는 일을 n_ref번 반복한다.
+
+    관측값이 이 분포의 5~95 백분위 안에 있으면 모형과 모순되지 않는다.
+
+    Args:
+        simulated_paths: 몬테카를로 경로 (N x T)
+        levels: 명목 신뢰수준
+        n_ref: 기준분포를 만들 표본 경로 수
+        seed: 표본 추출 시드
+
+    Returns:
+        dict: {'picp': {level: (n_ref,) 배열}, 'coverage_error': 배열, 'nmpiw': {level: 배열}}
+    """
+    paths = np.asarray(simulated_paths, dtype=float)
+    if paths.ndim != 2 or paths.shape[0] < 2:
+        raise ValueError("경로가 2개 이상인 (N x T) 배열이어야 한다")
+
+    N = paths.shape[0]
+    # 밴드는 전체 경로로 한 번만 계산한다. leave-one-out 효과는 N이 크면 1/N 수준이라
+    # 무시할 수 있고, 매 반복 분위수를 다시 구하는 비용(O(n_ref * N log N))을 없앤다.
+    bands = {}
+    for lv in levels:
+        a = 1.0 - lv
+        bands[lv] = (np.nanquantile(paths, a / 2.0, axis=0),
+                     np.nanquantile(paths, 1.0 - a / 2.0, axis=0))
+
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(N, size=min(n_ref, N), replace=False)
+    ref = paths[idx]
+
+    picp = {}
+    for lv in levels:
+        lo, hi = bands[lv]
+        picp[lv] = ((ref >= lo) & (ref <= hi)).mean(axis=1)
+
+    errors = np.mean([np.abs(picp[lv] - lv) for lv in levels], axis=0)
+
+    nmpiw = {}
+    span = np.nanmax(ref, axis=1) - np.nanmin(ref, axis=1)
+    for lv in levels:
+        lo, hi = bands[lv]
+        width = np.nanmean(hi - lo)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            nmpiw[lv] = np.where(span > 0, width / span, np.nan)
+
+    return {'picp': picp, 'coverage_error': errors, 'nmpiw': nmpiw}
+
+
+def coverage_percentile(observed, reference):
+    """관측 커버리지가 기준분포(coverage_reference)의 몇 백분위인지 (0~100)"""
+    ref = np.asarray(reference, dtype=float)
+    ref = ref[np.isfinite(ref)]
+    if ref.size == 0 or not np.isfinite(observed):
+        return float('nan')
+    return float(100.0 * np.mean(ref < observed))
 
 
 def realized_volatility(returns, window=20):
