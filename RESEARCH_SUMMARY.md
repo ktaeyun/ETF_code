@@ -284,6 +284,49 @@ S05 = 위기 시나리오(고변동성 + KOSPI 극단 + 관심도/거래량 급�
 | `results/simulator/scenario_regime/` | gbm_regime_simulator 산출 (아래 이슈 참조) |
 | `results/scenario_simulator/` | 시나리오 시뮬레이션 (Base, S05) + significance_test |
 
+### 3.1 다른 PC에서 이어서 작업할 때 — 착수 전 확인
+
+`.gitignore:212`가 `results/` 전체를 제외하므로, **clone만으로는 아래 4개 파일이 없다.**
+이들은 산출물이 아니라 다음 단계의 **입력**이라, 없으면 시뮬레이터가 바로 실패한다.
+작업 시작 전 존재 여부를 먼저 확인할 것.
+
+```bash
+FILES="results/scenario_selection/final_scenarios_latest.csv
+results/cache/regime_df_cache.csv
+results/cache/scenario_hmm_arrays.npz
+results/simulator/cache/sim_arrays.npz"
+
+echo "$FILES" | while read -r f; do
+  [ -e "$f" ] && echo "OK   $f" || echo "없음 $f"
+done
+```
+
+| 파일 | 역할 | 없을 때 |
+|---|---|---|
+| `results/scenario_selection/final_scenarios_latest.csv` | S01~S09 시나리오 정의 | `scenario_main.py` / `results_main.py` 실행 불가 |
+| `results/cache/regime_df_cache.csv` | HMM 레짐 분류 캐시 | `results_main.py` FileNotFoundError |
+| `results/cache/scenario_hmm_arrays.npz` | HMM 모수 캐시 | HMM 재적합(`n_init=10, B=1000`) 발생 |
+| `results/simulator/cache/sim_arrays.npz` | Base MC 배열 (NAV/GAP/KP, 1000x343) | NAV·GAP·KP 전체 재시뮬레이션 |
+
+**전부 있으면** 그대로 이어서 작업하면 된다. `simulator/main.py`는 데이터 파일 MD5 기반으로
+캐시 유효성을 자체 판정하므로(`_sim_cache_key`), 입력이 바뀌었으면 알아서 재계산한다.
+
+**하나라도 없으면** 아래 순서로 재생성한다. 이 경로는 HMM을 다시 적합하므로
+S01~S09 레짐 조합이 달라질 수 있다 — 달라지면 2.6~2.8 결과를 다시 확인할 것.
+
+```bash
+python preprocessing/run_pipeline.py        # 레짐 분류 + HMM 캐시
+python analysis/1_scenario_selection.py     # final_scenarios_latest.csv
+python simulator/main.py                    # Base MC + sim_arrays.npz (~5분)
+echo all | python simulator/scenario_main.py
+echo all | python simulator/results_main.py # M=100 x N=1000, 약 25분
+```
+
+`dataset/` 이하는 전부 git 추적 대상이므로 별도 조치가 필요 없다.
+`data/`(원천 CSV: `IBIT Premium.csv`, `USD_KRW.csv`, `BTC_KRW.csv`)는 저장소에 없지만,
+현재 파이프라인은 이 디렉터리를 쓰지 않는다 — `data_Modeling.py` / `data_variables.py` /
+`kp_data.py` 를 직접 재실행할 때만 필요하다.
+
 ---
 
 ## 4. 정리 후보 — 검토 요청 항목
