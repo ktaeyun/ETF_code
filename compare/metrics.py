@@ -1,55 +1,16 @@
 """
-NAV 시뮬레이터 검증 지표 모듈
-금융공학 연구용 평가 지표 구현
+시뮬레이터 검증 지표 모듈
+
+연구 프레임워크 Step 4(개별 시뮬레이터 검증) / Step 6(통합 시뮬레이터 검증)에서 쓰인다.
+  - 본 검증: PIT-KS, VaR-Kupiec, ES  -> calculate_statistical_tests()
+  - 보조 진단: 예측구간 커버리지(PICP/NMPIW) -> calculate_all_metrics()
 """
 
 import numpy as np
 import pandas as pd
 from scipy import stats
-from scipy.spatial.distance import euclidean
-from scipy.stats import kstest, anderson_ksamp, ks_2samp, chi2
+from scipy.stats import kstest, chi2
 from statsmodels.tsa.stattools import acf
-from statsmodels.regression.linear_model import OLS
-import warnings
-
-
-def dtw_distance(series1, series2):
-    """
-    Dynamic Time Warping (DTW) 거리 계산
-    
-    Args:
-        series1: 시계열 1
-        series2: 시계열 2
-    
-    Returns:
-        float: DTW 거리 (정규화된 값)
-    """
-    s1 = np.array(series1)
-    s2 = np.array(series2)
-    n, m = len(s1), len(s2)
-    
-    # 스케일 정규화 (0~1 범위로)
-    if np.max(s1) - np.min(s1) > 0:
-        s1 = (s1 - np.min(s1)) / (np.max(s1) - np.min(s1))
-    if np.max(s2) - np.min(s2) > 0:
-        s2 = (s2 - np.min(s2)) / (np.max(s2) - np.min(s2))
-    
-    # DTW 행렬 초기화
-    dtw_matrix = np.full((n + 1, m + 1), np.inf)
-    dtw_matrix[0, 0] = 0
-    
-    # DTW 계산
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            cost = abs(s1[i-1] - s2[j-1])
-            dtw_matrix[i, j] = cost + min(
-                dtw_matrix[i-1, j],
-                dtw_matrix[i, j-1],
-                dtw_matrix[i-1, j-1]
-            )
-    
-    # 정규화된 DTW 거리 반환
-    return dtw_matrix[n, m] / max(n, m)
 
 
 def interval_coverage(actual, simulated_paths, levels=(0.50, 0.80, 0.95)):
@@ -127,42 +88,6 @@ def coverage_metrics(actual, simulated_paths, prefix, levels=(0.50, 0.80, 0.95))
     return out
 
 
-def pmc(series1, series2):
-    """
-    Path Momentum Consistency (PMC)
-    모멘텀 방향의 일치성 측정
-    
-    Args:
-        series1: 시계열 1
-        series2: 시계열 2
-    
-    Returns:
-        float: PMC 값 (0~1, 1에 가까울수록 일치)
-    """
-    s1 = np.array(series1)
-    s2 = np.array(series2)
-    
-    # 모멘텀 (변화율) 계산
-    momentum1 = np.diff(s1)
-    momentum2 = np.diff(s2)
-    
-    # 부호 일치 비율
-    sign_match = np.mean(np.sign(momentum1) == np.sign(momentum2))
-    
-    # 크기 상관관계
-    if np.std(momentum1) > 0 and np.std(momentum2) > 0:
-        size_corr = np.corrcoef(momentum1, momentum2)[0, 1]
-        if np.isnan(size_corr):
-            size_corr = 0
-    else:
-        size_corr = 0
-    
-    # PMC: 부호 일치와 크기 상관관계의 가중 평균
-    pmc_value = 0.5 * sign_match + 0.5 * (size_corr + 1) / 2
-    
-    return pmc_value
-
-
 def realized_volatility(returns, window=20):
     """
     Realized Volatility 계산 (rolling window)
@@ -179,394 +104,29 @@ def realized_volatility(returns, window=20):
     return rv.bfill().fillna(rv.iloc[window-1] if len(rv) > window-1 else rv.iloc[-1] if len(rv) > 0 else 0).values
 
 
-def rvr(actual_returns, simulated_returns, window=20):
-    """
-    Realized Volatility Regression (RVR)
-    R^2와 β1의 1 근접성 측정
-    
-    Args:
-        actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률
-        window: Realized Volatility 계산 윈도우
-    
-    Returns:
-        dict: {'r_squared': R^2, 'beta1': β1, 'beta1_proximity': |β1 - 1|}
-    """
-    rv_actual = realized_volatility(actual_returns, window)
-    rv_sim = realized_volatility(simulated_returns, window)
-    
-    # 유효한 값만 선택
-    valid_mask = ~(np.isnan(rv_actual) | np.isnan(rv_sim))
-    rv_actual_valid = rv_actual[valid_mask]
-    rv_sim_valid = rv_sim[valid_mask]
-    
-    if len(rv_actual_valid) < 10:
-        return {'r_squared': 0.0, 'beta1': 0.0, 'beta1_proximity': 1.0}
-    
-    # 선형 회귀: RV_actual = β0 + β1 * RV_sim
-    try:
-        from statsmodels.api import add_constant
-        X = add_constant(rv_sim_valid)
-        model = OLS(rv_actual_valid, X).fit()
-        r_squared = model.rsquared
-        beta1 = model.params[1] if len(model.params) > 1 else model.params[0] if len(model.params) > 0 else 0.0
-        beta1_proximity = abs(beta1 - 1.0)
-    except Exception as e:
-        r_squared = 0.0
-        beta1 = 0.0
-        beta1_proximity = 1.0
-    
-    return {
-        'r_squared': r_squared,
-        'beta1': beta1,
-        'beta1_proximity': beta1_proximity
-    }
-
-
-def vvs(actual_vol, simulated_vol_paths):
-    """
-    Volatility of Volatility Similarity (VVS)
-    논문 정의: 변동성의 변동성(VoV) 유사성
-    
-    Args:
-        actual_vol: 실제 변동성 시계열 (T,)
-        simulated_vol_paths: 시뮬레이션 변동성 경로들 (N x T 배열)
-    
-    Returns:
-        float: VVS 값 (0~1, 1에 가까울수록 좋음)
-    """
-    actual_vol = np.array(actual_vol)
-    simulated_vol_paths = np.array(simulated_vol_paths)
-    
-    # 1차원 배열인 경우 처리
-    if simulated_vol_paths.ndim == 1:
-        simulated_vol_paths = simulated_vol_paths.reshape(1, -1)
-    
-    # 실제 변동성의 VoV 계산
-    if len(actual_vol) < 2:
-        return 0.0
-    
-    delta_actual = np.abs(np.diff(actual_vol))
-    mean_delta_actual = np.mean(delta_actual)
-    vov_actual = np.sqrt(np.mean((delta_actual - mean_delta_actual)**2))
-    
-    # 시뮬레이션 변동성의 평균 VoV 계산
-    vov_sim_list = []
-    for vol_path in simulated_vol_paths:
-        if len(vol_path) < 2:
-            continue
-        delta_sim = np.abs(np.diff(vol_path))
-        mean_delta_sim = np.mean(delta_sim)
-        vov_sim = np.sqrt(np.mean((delta_sim - mean_delta_sim)**2))
-        vov_sim_list.append(vov_sim)
-    
-    if len(vov_sim_list) == 0:
-        return 0.0
-    
-    vov_sim_avg = np.mean(vov_sim_list)
-    
-    # VVS = 1 - |VoV_sim - VoV_actual| / (VoV_sim + VoV_actual)
-    if vov_sim_avg + vov_actual == 0:
-        return 0.0
-    
-    vvs_value = 1 - abs(vov_sim_avg - vov_actual) / (vov_sim_avg + vov_actual)
-    return max(0.0, min(1.0, vvs_value))
-
-
-def vpr(actual_vol, simulated_vol_paths):
-    """
-    Volatility Persistence Ratio (VPR)
-    논문 정의: 변동성의 autocovariance 비율
-    
-    Args:
-        actual_vol: 실제 변동성 시계열 (T,)
-        simulated_vol_paths: 시뮬레이션 변동성 경로들 (N x T 배열)
-    
-    Returns:
-        float: VPR 값 (1에 가까울수록 좋음)
-    """
-    actual_vol = np.array(actual_vol)
-    simulated_vol_paths = np.array(simulated_vol_paths)
-    
-    # 1차원 배열인 경우 처리
-    if simulated_vol_paths.ndim == 1:
-        simulated_vol_paths = simulated_vol_paths.reshape(1, -1)
-    
-    T = len(actual_vol)
-    
-    if T < 2:
-        return 0.0
-    
-    # 실제 변동성의 autocovariance
-    mean_actual = np.mean(actual_vol)
-    autocov_actual = 0.0
-    for i in range(T - 1):
-        autocov_actual += (actual_vol[i+1] - mean_actual) * (actual_vol[i] - mean_actual)
-    autocov_actual = autocov_actual / (T - 1)
-    
-    # 시뮬레이션 변동성의 평균 autocovariance
-    autocov_sim_list = []
-    for vol_path in simulated_vol_paths:
-        if len(vol_path) != T:
-            continue
-        mean_sim = np.mean(vol_path)
-        autocov_sim = 0.0
-        for i in range(T - 1):
-            autocov_sim += (vol_path[i+1] - mean_sim) * (vol_path[i] - mean_sim)
-        autocov_sim = autocov_sim / (T - 1)
-        autocov_sim_list.append(autocov_sim)
-    
-    if len(autocov_sim_list) == 0:
-        return 0.0
-    
-    autocov_sim_avg = np.mean(autocov_sim_list)
-    
-    # VPR = autocov_sim / autocov_actual
-    if autocov_actual == 0:
-        return 0.0
-    
-    return autocov_sim_avg / autocov_actual
-
-
-def vjc(actual_vol, simulated_vol_paths):
-    """
-    Volatility Jump Capture (VJC)
-    논문 정의: 실제 변동성 점프를 시뮬레이션 경로들이 포착하는 비율
-    
-    Args:
-        actual_vol: 실제 변동성 시계열 (T,)
-        simulated_vol_paths: 시뮬레이션 변동성 경로들 (N x T 배열)
-    
-    Returns:
-        float: VJC 값 (높을수록 좋음, 0~1)
-    """
-    actual_vol = np.array(actual_vol)
-    simulated_vol_paths = np.array(simulated_vol_paths)
-    
-    # 1차원 배열인 경우 처리
-    if simulated_vol_paths.ndim == 1:
-        simulated_vol_paths = simulated_vol_paths.reshape(1, -1)
-    
-    T = len(actual_vol)
-    
-    if T < 2:
-        return 0.0
-    
-    # 실제 변동성 점프 감지
-    delta_actual = np.abs(np.diff(actual_vol))
-    if len(delta_actual) == 0:
-        return 0.0
-    
-    threshold_actual = np.quantile(delta_actual, 0.95)  # 상위 5%를 점프로 간주
-    actual_jump_times = np.where(delta_actual > threshold_actual)[0]
-    N_jumps = len(actual_jump_times)
-    
-    if N_jumps == 0:
-        return 0.0
-    
-    # 각 시뮬레이션 경로에서 점프 포착 확인
-    total_captured = 0.0
-    for vol_path in simulated_vol_paths:
-        if len(vol_path) != T:
-            continue
-        delta_sim = np.abs(np.diff(vol_path))
-        if len(delta_sim) == 0:
-            continue
-        threshold_sim = np.quantile(delta_sim, 0.95)
-        
-        for tj in actual_jump_times:
-            if tj < len(delta_sim) and delta_sim[tj] > threshold_sim:
-                total_captured += 1
-    
-    # VJC = 평균 포착 비율
-    n_paths = len(simulated_vol_paths)
-    if n_paths == 0:
-        return 0.0
-    
-    vjc_value = total_captured / (n_paths * N_jumps)
-    return vjc_value
-
-
-def twad(actual_returns, simulated_returns, tail_weight=0.1):
-    """
-    Tail-Weighted Anderson-Darling (TWAD)
-    꼬리 가중 Anderson-Darling 검정
-    
-    Args:
-        actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률
-        tail_weight: 꼬리 가중치
-    
-    Returns:
-        float: TWAD 통계량 (작을수록 유사)
-    """
-    actual_values = np.array(actual_returns)
-    sim_values = np.array(simulated_returns)
-    
-    # 꼬리 영역 정의 (상위/하위 tail_weight%)
-    lower_tail = np.quantile(actual_values, tail_weight)
-    upper_tail = np.quantile(actual_values, 1 - tail_weight)
-    
-    # 꼬리 영역 데이터만 선택
-    actual_tail = actual_values[(actual_values <= lower_tail) | (actual_values >= upper_tail)]
-    sim_tail = sim_values[(sim_values <= lower_tail) | (sim_values >= upper_tail)]
-    
-    if len(actual_tail) < 5 or len(sim_tail) < 5:
-        return np.inf
-    
-    # Anderson-Darling 검정 (간단한 근사)
-    # 실제로는 더 정교한 구현 필요하지만, 여기서는 간단히 처리
-    try:
-        # 두 샘플의 경험적 분포 함수 비교
-        all_values = np.concatenate([actual_tail, sim_tail])
-        sorted_values = np.sort(all_values)
-        
-        n1, n2 = len(actual_tail), len(sim_tail)
-        n = n1 + n2
-        
-        ad_stat = 0.0
-        for i, val in enumerate(sorted_values):
-            f1 = np.sum(actual_tail <= val) / n1
-            f2 = np.sum(sim_tail <= val) / n2
-            
-            if i > 0 and i < len(sorted_values) - 1:
-                weight = 1.0 / (i * (n - i))
-                ad_stat += weight * (f1 - f2)**2
-        
-        return ad_stat
-    except:
-        return np.inf
-
-
-def ks_test(actual_returns, simulated_returns):
-    """
-    Kolmogorov-Smirnov 검정
-    
-    Args:
-        actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률
-    
-    Returns:
-        dict: {'statistic': KS 통계량, 'pvalue': p-value}
-    """
-    actual_values = np.array(actual_returns)
-    sim_values = np.array(simulated_returns)
-    
-    try:
-        # 두 표본의 경험적 분포 함수 비교
-        from scipy.stats import ks_2samp
-        ks_stat, pvalue = ks_2samp(actual_values, sim_values)
-    except:
-        # Fallback: 간단한 방법
-        try:
-            ks_stat, pvalue = kstest(actual_values, lambda x: np.mean(sim_values <= x))
-        except:
-            ks_stat = 1.0
-            pvalue = 0.0
-    
-    return {
-        'statistic': ks_stat,
-        'pvalue': pvalue
-    }
-
-
-def distribution_moments(actual_returns, simulated_returns):
-    """
-    분포 모멘트 근접성 (mean, median, std)
-    
-    Args:
-        actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률
-    
-    Returns:
-        dict: {'mean_proximity': mean 근접성, 'median_proximity': median 근접성, 'std_proximity': std 근접성}
-    """
-    actual_values = np.array(actual_returns)
-    sim_values = np.array(simulated_returns)
-    
-    actual_mean = np.mean(actual_values)
-    sim_mean = np.mean(sim_values)
-    mean_proximity = 1 - abs(actual_mean - sim_mean) / (abs(actual_mean) + 1e-10)
-    
-    actual_median = np.median(actual_values)
-    sim_median = np.median(sim_values)
-    median_proximity = 1 - abs(actual_median - sim_median) / (abs(actual_median) + 1e-10)
-    
-    actual_std = np.std(actual_values)
-    sim_std = np.std(sim_values)
-    std_proximity = 1 - abs(actual_std - sim_std) / (actual_std + 1e-10)
-    
-    return {
-        'mean_proximity': mean_proximity,
-        'median_proximity': median_proximity,
-        'std_proximity': std_proximity,
-        'actual_mean': actual_mean,
-        'sim_mean': sim_mean,
-        'actual_median': actual_median,
-        'sim_median': sim_median,
-        'actual_std': actual_std,
-        'sim_std': sim_std
-    }
-
-
-def var_es_comparison(actual_returns, simulated_returns, alpha=0.05):
-    """
-    VaR(5%) 및 ES(5%) 근접성 비교
-    
-    Args:
-        actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률
-        alpha: 유의수준 (기본값: 0.05 = 5%)
-    
-    Returns:
-        dict: VaR 및 ES 비교 결과
-    """
-    actual_values = np.array(actual_returns)
-    sim_values = np.array(simulated_returns)
-    
-    # VaR 계산 (하위 α 분위수)
-    actual_var = np.quantile(actual_values, alpha)
-    sim_var = np.quantile(sim_values, alpha)
-    var_proximity = 1 - abs(actual_var - sim_var) / (abs(actual_var) + 1e-10)
-    
-    # ES 계산 (Conditional VaR, 평균)
-    actual_es = np.mean(actual_values[actual_values <= actual_var])
-    sim_es = np.mean(sim_values[sim_values <= sim_var])
-    es_proximity = 1 - abs(actual_es - sim_es) / (abs(actual_es) + 1e-10)
-    
-    return {
-        'var_proximity': var_proximity,
-        'es_proximity': es_proximity,
-        'actual_var': actual_var,
-        'sim_var': sim_var,
-        'actual_es': actual_es,
-        'sim_es': sim_es
-    }
-
-
 def calculate_all_metrics(actual_nav, simulated_nav, actual_returns, simulated_returns,
                           monte_carlo_nav_paths=None, monte_carlo_returns_paths=None):
     """
-    모든 검증 지표 계산 (논문 정의에 맞춤)
-    
+    보조 검증 지표 계산 — 예측구간 커버리지
+
+    본 검증(PIT-KS, VaR-Kupiec, ES)은 calculate_statistical_tests()가 담당한다.
+    이 함수는 그 세 검정이 다루지 않는 축인 '구간 커버리지'만 보조로 산출한다.
+
     Args:
-        actual_nav: 실제 NAV 시계열
-        simulated_nav: 시뮬레이션된 NAV 시계열 (대표 경로)
+        actual_nav: 실제 가격/수준 시계열
+        simulated_nav: 대표 경로 (커버리지 계산에는 쓰이지 않으며 서명 호환용)
         actual_returns: 실제 수익률
-        simulated_returns: 시뮬레이션된 수익률 (대표 경로)
-        monte_carlo_nav_paths: 몬테카를로 시뮬레이션 NAV 경로들 (N x T 배열, 선택)
-        monte_carlo_returns_paths: 몬테카를로 시뮬레이션 수익률 경로들 (N x T 배열, 선택)
-    
+        simulated_returns: 대표 경로 수익률 (동일)
+        monte_carlo_nav_paths: MC 가격 경로 (N x T) — 커버리지 산출에 필수
+        monte_carlo_returns_paths: MC 수익률 경로 (N x T)
+
     Returns:
-        dict: 모든 검증 지표 결과
+        dict: picp50/80/95_price, coverage_error_price, nmpiw95_price 및 동일한 _vol 계열
     """
     metrics = {}
-    
-    # Price Path Metrics
-    print("  [Price Path Metrics] 계산 중...")
-    metrics['dtw_price'] = dtw_distance(actual_nav, simulated_nav)
-    
-    # 예측구간 커버리지: 몬테카를로 경로가 있어야 산출 가능
+
+    # 가격 예측구간 커버리지
+    print("  [예측구간 커버리지] 계산 중...")
     if monte_carlo_nav_paths is not None and len(monte_carlo_nav_paths) > 0:
         if isinstance(monte_carlo_nav_paths, list):
             monte_carlo_nav_paths = np.array(monte_carlo_nav_paths)
@@ -574,48 +134,17 @@ def calculate_all_metrics(actual_nav, simulated_nav, actual_returns, simulated_r
     else:
         # 대표 경로 하나로는 구간을 만들 수 없다
         metrics.update(coverage_metrics(actual_nav, np.empty((0, len(actual_nav))), 'price'))
-    
-    metrics['pmc'] = pmc(actual_nav, simulated_nav)
-    
-    # Volatility Metrics
-    print("  [Volatility Metrics] 계산 중...")
-    actual_rv = realized_volatility(actual_returns)
-    sim_rv = realized_volatility(simulated_returns)
-    metrics['dtw_vol'] = dtw_distance(actual_rv, sim_rv)
-    
+
     # 변동성 예측구간 커버리지
+    actual_rv = realized_volatility(actual_returns)
     if monte_carlo_returns_paths is not None and len(monte_carlo_returns_paths) > 0:
         if isinstance(monte_carlo_returns_paths, list):
             monte_carlo_returns_paths = np.array(monte_carlo_returns_paths)
-        # 시뮬레이션 수익률에서 변동성 경로 생성
         sim_vol_paths = np.array([realized_volatility(ret) for ret in monte_carlo_returns_paths])
         metrics.update(coverage_metrics(actual_rv, sim_vol_paths, 'vol'))
     else:
         metrics.update(coverage_metrics(actual_rv, np.empty((0, len(actual_rv))), 'vol'))
-    
-    metrics['rvr'] = rvr(actual_returns, simulated_returns)
-    
-    # VVS, VPR, VJC: 몬테카를로 경로 필요
-    if monte_carlo_returns_paths is not None and len(monte_carlo_returns_paths) > 0:
-        if isinstance(monte_carlo_returns_paths, list):
-            monte_carlo_returns_paths = np.array(monte_carlo_returns_paths)
-        sim_vol_paths = np.array([realized_volatility(ret) for ret in monte_carlo_returns_paths])
-        metrics['vvs'] = vvs(actual_rv, sim_vol_paths)
-        metrics['vpr'] = vpr(actual_rv, sim_vol_paths)
-        metrics['vjc'] = vjc(actual_rv, sim_vol_paths)
-    else:
-        # 단일 경로인 경우 구버전 사용
-        metrics['vvs'] = vvs(actual_returns, simulated_returns)
-        metrics['vpr'] = vpr(actual_returns, simulated_returns)
-        metrics['vjc'] = vjc(actual_returns, simulated_returns)
-    
-    # Return Distribution & Risk
-    print("  [Return Distribution & Risk Metrics] 계산 중...")
-    metrics['twad'] = twad(actual_returns, simulated_returns)
-    metrics['ks'] = ks_test(actual_returns, simulated_returns)
-    metrics['distribution_moments'] = distribution_moments(actual_returns, simulated_returns)
-    metrics['var_es'] = var_es_comparison(actual_returns, simulated_returns)
-    
+
     return metrics
 
 

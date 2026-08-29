@@ -196,9 +196,9 @@ def main():
         monte_carlo_returns_paths=monte_carlo_returns_array,
     )
     v = validation_metrics
-    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
-                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
+                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
         val = v.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
@@ -306,9 +306,9 @@ def main():
         monte_carlo_returns_paths=simulated_gap_changes_array,
     )
     v_gap = gap_validation_metrics
-    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
-                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
+                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
         val = v_gap.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
@@ -450,9 +450,9 @@ def main():
         monte_carlo_returns_paths=simulated_kp_changes_array,
     )
     v_kp = kp_validation_metrics
-    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
-                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
+                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
         val = v_kp.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
@@ -539,9 +539,9 @@ def main():
         monte_carlo_returns_paths=simulated_combined_returns_array,
     )
     v_combined = combined_validation_metrics
-    for name, key in [("PICP95 Price", "picp95_price"), ("CovErr Price", "coverage_error_price"),
-                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol"),
-                      ("DTW Price", "dtw_price"), ("PMC", "pmc")]:
+    for name, key in [("PICP50 Price", "picp50_price"), ("PICP95 Price", "picp95_price"),
+                      ("CovErr Price", "coverage_error_price"), ("NMPIW95 Price", "nmpiw95_price"),
+                      ("PICP95 Vol", "picp95_vol"), ("CovErr Vol", "coverage_error_vol")]:
         val = v_combined.get(key)
         if isinstance(val, (int, float)):
             print(f"  {name}: {val:.4f}")
