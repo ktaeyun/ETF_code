@@ -100,6 +100,40 @@ _SIM_META_PATH = _BASE_DIR / "cache" / "sim_meta.json"
 METRICS = ["VaR_95", "CVaR_95", "VaR_99", "CVaR_99",
            "Volatility", "Max_DD_mean", "p50", "p95"]
 
+# ──────────────────────────────────────────────────────────────
+# 측정 기준(basis)
+#
+# 이 연구의 시나리오는 GAP과 KP만 조작하고 NAV는 Base로 고정한다. 따라서 전체
+# ETF 가격에서 지표를 재면 조작하지 않은 NAV의 변동이 분모에 함께 들어가
+# 시나리오 효과가 희석된다. 실제로 최종시점 로그가격 분산의 100%를 NAV가
+# 차지하고 GAP+KP는 0.02%에 그친다(일별 변화 기준으로는 GAP+KP가 11.6%).
+#
+# 그래서 두 기준으로 나란히 산출한다.
+#   etf : NAV x (1+GAP) x (1+KP)  — 투자자가 실제로 보는 가격. 기존 기준
+#   kr  : (1+GAP) x (1+KP)        — 조작 대상만 분리. 시나리오 효과를 직접 측정
+# ──────────────────────────────────────────────────────────────
+BASES = {
+    "etf": {"label": "전체 ETF (NAV x (1+GAP) x (1+KP))", "include_nav": True},
+    "kr":  {"label": "한국 요인 ((1+GAP) x (1+KP))",       "include_nav": False},
+}
+
+
+def _build_paths(mc_nav: np.ndarray, mc_gap: np.ndarray, mc_kp: np.ndarray,
+                 anchor: float, include_nav: bool) -> np.ndarray:
+    """기준에 따라 경로를 만든 뒤 anchor(원)로 정규화.
+
+    include_nav=True 면 기존 _build_korean_etf_paths 와 동일한 결과를 낸다.
+    """
+    if include_nav:
+        return _build_korean_etf_paths(mc_nav, mc_gap, mc_kp, anchor)
+
+    min_N = min(mc_gap.shape[0], mc_kp.shape[0])
+    min_T = min(mc_gap.shape[1], mc_kp.shape[1])
+    raw = (1 + mc_gap[:min_N, :min_T]) * (1 + mc_kp[:min_N, :min_T])
+    init = raw[:, 0:1]
+    init = np.where(init == 0, 1.0, init)
+    return raw * (anchor / init)
+
 # ══════════════════════════════════════════════════════════════
 # 1. Base/시나리오 공통 파라미터 + 외생변수 준비
 # ══════════════════════════════════════════════════════════════
@@ -246,6 +280,22 @@ def _load_actual_etf(min_T: int, anchor: float) -> np.ndarray:
     return np.full(min_T, anchor)
 
 
+def _actual_korean_factor(series: dict, min_T: int, anchor: float) -> np.ndarray:
+    """한국 요인 기준의 실제 대응물: (1+실제GAP)(1+실제KP)를 anchor로 정규화.
+
+    compute_risk_metrics 는 이 값을 MAE_actual 계산에만 쓴다. 기준이 다르면
+    비교 대상도 달라져야 하므로 전체 ETF 가격을 그대로 넘기지 않는다.
+    """
+    g = np.asarray(series["actual_gap"]).flatten()[:min_T]
+    k = np.asarray(series["actual_kp"]).flatten()[:min_T]
+    n = min(len(g), len(k), min_T)
+    raw = (1 + g[:n]) * (1 + k[:n])
+    if n < min_T:
+        raw = np.pad(raw, (0, min_T - n), mode="edge")
+    init = raw[0] if raw[0] != 0 else 1.0
+    return raw * (anchor / init)
+
+
 def run_repeated_mc(
     scenario_id: str,
     scenario: dict | None,
@@ -256,26 +306,37 @@ def run_repeated_mc(
     df_kp_hist: pd.DataFrame,
     mc_nav: np.ndarray,
     M: int, N: int, T_gen: int, seed: int, anchor: float = 10000.0,
-) -> pd.DataFrame:
+) -> dict[str, pd.DataFrame]:
     """scenario_id 에 대해 M회 독립 반복(CRN)으로 N개 경로씩 시뮬레이션하고,
-    반복마다 결합 ETF 가격경로의 리스크 지표를 계산해 (M행 x 지표) DataFrame 반환.
+    반복마다 각 기준(BASES)의 리스크 지표를 계산한다.
+
+    Returns
+    -------
+    {basis_key: (M행 x 지표) DataFrame}
+
+    두 기준은 동일한 mc_gap / mc_kp 를 공유하고 결합 방식만 다르므로,
+    기준을 하나 더 늘려도 시뮬레이션 비용은 늘지 않는다.
     """
     series = _prepare_series(scenario, hmm_results, df_gap_hist, df_kp_hist, T_gen, seed)
 
-    rows = []
+    rows = {b: [] for b in BASES}
     for m in range(M):
         seed_base_m = seed + m * 1_000_000  # Base/시나리오 공통 산식 → CRN
         mc_gap, mc_kp = _run_mc_batch(gap_sim, kp_sim, series, N, seed_base_m)
-        combined = _build_korean_etf_paths(mc_nav, mc_gap, mc_kp, anchor)
-        actual_etf = _load_actual_etf(combined.shape[1], anchor)
-        risk = compute_risk_metrics(combined, actual_etf, label=scenario_id)
-        risk["m"] = m
-        rows.append(risk)
+
+        for b, cfg in BASES.items():
+            paths = _build_paths(mc_nav, mc_gap, mc_kp, anchor, cfg["include_nav"])
+            T_b = paths.shape[1]
+            actual = (_load_actual_etf(T_b, anchor) if cfg["include_nav"]
+                      else _actual_korean_factor(series, T_b, anchor))
+            risk = compute_risk_metrics(paths, actual, label=scenario_id)
+            risk["m"] = m
+            rows[b].append(risk)
 
         if (m + 1) % 10 == 0 or m == M - 1:
             print(f"    [{scenario_id}] 반복 {m + 1}/{M} 완료")
 
-    return pd.DataFrame(rows)
+    return {b: pd.DataFrame(v) for b, v in rows.items()}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -461,71 +522,117 @@ def main():
     print(f"  [Step 4] Base + {len(all_scenarios)}개 시나리오, 각 M={args.M}회 반복 (N={args.N})")
     print("=" * 60)
 
-    repeat_dfs: dict[str, pd.DataFrame] = {}
+    print(f"  측정 기준 {len(BASES)}종:")
+    for b, cfg in BASES.items():
+        print(f"    [{b}] {cfg['label']}")
+
+    # per_basis[basis][scenario_id] = (M행 x 지표) DataFrame
+    per_basis: dict[str, dict[str, pd.DataFrame]] = {b: {} for b in BASES}
+
     print("\n  -- Base --")
-    repeat_dfs["Base"] = run_repeated_mc(
+    _res = run_repeated_mc(
         "Base", None, hmm_results, gap_sim, kp_sim, df_gap_hist, df_kp_hist,
         mc_nav, M=args.M, N=args.N, T_gen=args.T, seed=args.seed,
     )
+    for b in BASES:
+        per_basis[b]["Base"] = _res[b]
+
     for sid, scenario in all_scenarios.items():
         print(f"\n  -- {sid} --")
-        repeat_dfs[sid] = run_repeated_mc(
+        _res = run_repeated_mc(
             sid, scenario, hmm_results, gap_sim, kp_sim, df_gap_hist, df_kp_hist,
             mc_nav, M=args.M, N=args.N, T_gen=args.T, seed=args.seed,
         )
+        for b in BASES:
+            per_basis[b][sid] = _res[b]
 
-    # 반복별 리스크 지표 원본 저장 (감사/재현용)
-    raw_rows = []
-    for sid, df in repeat_dfs.items():
-        d = df.copy()
-        d.insert(0, "scenario_id", sid)
-        raw_rows.append(d)
-    raw_df = pd.concat(raw_rows, ignore_index=True)
-    raw_path = out_dir / "raw_repeat_metrics.csv"
-    raw_df.to_csv(raw_path, index=False, encoding="utf-8-sig")
-    print(f"\n  반복별 리스크 지표 원본 저장: {raw_path}")
-
-    # ── Step 5: Base 대비 통계적 유의성 검정 ────────────────────────────
+    # ── Step 5: 기준별 저장 + Base 대비 유의성 검정 ─────────────────────
     print("\n" + "=" * 60)
     print("  [Step 5] Base 대비 통계적 유의성 검정 (다중비교 보정 미적용)")
     print("=" * 60)
 
-    base_df = repeat_dfs["Base"]
-    sig_rows = []
-    for sid in all_scenarios:
-        sig_rows.extend(compare_base_vs_scenario(
-            base_df, repeat_dfs[sid], sid, alpha=args.alpha
-        ))
-    sig_df = pd.DataFrame(sig_rows)
-    n_compare = len(sig_df)
-    print(f"  총 비교 수: {n_compare}회 (시나리오 {len(all_scenarios)}개 x 지표 {len(METRICS)}개), "
-          f"보정 없음 (Rothman 1990 근거)")
+    sig_by_basis: dict[str, pd.DataFrame] = {}
+    eff_by_basis: dict[str, pd.DataFrame] = {}
+    flag_by_basis: dict[str, pd.DataFrame] = {}
 
-    sig_path = out_dir / "significance_results.csv"
-    sig_df.to_csv(sig_path, index=False, encoding="utf-8-sig")
-    print(f"  유의성 검정 결과 저장: {sig_path}")
+    for b, cfg in BASES.items():
+        repeat_dfs = per_basis[b]
 
-    # 매트릭스: 지표(행) x 시나리오(열)
-    pval_matrix = sig_df.pivot(index="metric", columns="scenario_id", values="pvalue")
-    flag_matrix = sig_df.pivot(index="metric", columns="scenario_id", values="significant")
-    effect_matrix = sig_df.pivot(index="metric", columns="scenario_id", values="pct_change")
+        # 반복별 리스크 지표 원본 (감사/재현용)
+        raw_rows = []
+        for sid, df in repeat_dfs.items():
+            d = df.copy()
+            d.insert(0, "scenario_id", sid)
+            d.insert(1, "basis", b)
+            raw_rows.append(d)
+        pd.concat(raw_rows, ignore_index=True).to_csv(
+            out_dir / f"raw_repeat_metrics_{b}.csv", index=False, encoding="utf-8-sig")
 
-    pval_matrix.to_csv(out_dir / "significance_matrix_pvalue.csv", encoding="utf-8-sig")
-    flag_matrix.to_csv(out_dir / "significance_matrix_flag.csv", encoding="utf-8-sig")
-    effect_matrix.to_csv(out_dir / "effect_size_matrix_pct.csv", encoding="utf-8-sig")
+        base_df = repeat_dfs["Base"]
+        sig_rows = []
+        for sid in all_scenarios:
+            sig_rows.extend(compare_base_vs_scenario(
+                base_df, repeat_dfs[sid], sid, alpha=args.alpha
+            ))
+        sig_df = pd.DataFrame(sig_rows)
+        sig_df.insert(0, "basis", b)
+        sig_df.to_csv(out_dir / f"significance_results_{b}.csv",
+                      index=False, encoding="utf-8-sig")
 
-    print("\n  [유의성 매트릭스 (p-value)]")
-    print(pval_matrix.round(4).to_string())
+        pval = sig_df.pivot(index="metric", columns="scenario_id", values="pvalue")
+        flag = sig_df.pivot(index="metric", columns="scenario_id", values="significant")
+        eff = sig_df.pivot(index="metric", columns="scenario_id", values="pct_change")
+        pval.to_csv(out_dir / f"significance_matrix_pvalue_{b}.csv", encoding="utf-8-sig")
+        flag.to_csv(out_dir / f"significance_matrix_flag_{b}.csv", encoding="utf-8-sig")
+        eff.to_csv(out_dir / f"effect_size_matrix_pct_{b}.csv", encoding="utf-8-sig")
 
-    sig_only = sig_df[sig_df["significant"]].sort_values("pvalue")
-    print(f"\n  [유의미한 항목: {len(sig_only)}/{n_compare}]")
-    if len(sig_only) > 0:
-        print(sig_only[["scenario_id", "metric", "base_mean", "scenario_mean",
-                         "diff_mean", "direction", "pct_change", "method", "pvalue"]]
-              .round(4).to_string(index=False))
+        sig_by_basis[b], eff_by_basis[b], flag_by_basis[b] = sig_df, eff, flag
 
-    print(f"\n  결과 디렉터리: {out_dir}")
-    return {"repeat_dfs": repeat_dfs, "significance": sig_df}
+        n_sig = int(sig_df["significant"].sum())
+        print(f"\n  [{b}] {cfg['label']}")
+        print(f"      비교 {len(sig_df)}회 중 유의 {n_sig}회  ->  *_{b}.csv")
+
+    # ── Step 6: 기준 간 효과크기 비교 ───────────────────────────────────
+    print("\n" + "=" * 60)
+    print("  [Step 6] 기준 간 효과크기 비교")
+    print("=" * 60)
+
+    keys = list(BASES)
+    n_sc = len(all_scenarios)
+    cmp_rows = []
+    for metric in METRICS:
+        row = {"metric": metric}
+        for b in keys:
+            e = eff_by_basis[b].loc[metric]
+            f = flag_by_basis[b].loc[metric]
+            row[f"effect_median_{b}"] = float(e.abs().median())
+            row[f"effect_S05_{b}"] = float(e.get("S05", float("nan")))
+            row[f"n_significant_{b}"] = int(f.sum())
+        denom = row[f"effect_median_{keys[0]}"]
+        row["amplification"] = (row[f"effect_median_{keys[1]}"] / denom
+                                if denom else float("nan"))
+        cmp_rows.append(row)
+
+    cmp_df = pd.DataFrame(cmp_rows).sort_values("effect_median_kr", ascending=False)
+    cmp_df.to_csv(out_dir / "effect_size_comparison.csv",
+                  index=False, encoding="utf-8-sig")
+
+    hdr = "지표"
+    print(f"\n  {hdr:<13}{'전체ETF 중앙':>14}{'한국요인 중앙':>15}{'증폭':>9}"
+          f"{'전체 유의':>11}{'한국 유의':>11}")
+    for _, r in cmp_df.iterrows():
+        print(f"  {r['metric']:<13}{r['effect_median_etf']:13.3f}%{r['effect_median_kr']:14.3f}%"
+              f"{r['amplification']:8.1f}x{int(r['n_significant_etf']):8d}/{n_sc}"
+              f"{int(r['n_significant_kr']):8d}/{n_sc}")
+
+    print(f"\n  S05(위기 시나리오) 효과크기")
+    print(f"  {hdr:<13}{'전체ETF':>12}{'한국요인':>13}")
+    for _, r in cmp_df.iterrows():
+        print(f"  {r['metric']:<13}{r['effect_S05_etf']:+11.3f}%{r['effect_S05_kr']:+12.3f}%")
+
+    print(f"\n  비교표 저장: {out_dir / 'effect_size_comparison.csv'}")
+    print(f"  결과 디렉터리: {out_dir}")
+    return {"per_basis": per_basis, "significance": sig_by_basis, "comparison": cmp_df}
 
 
 if __name__ == "__main__":
