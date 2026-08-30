@@ -64,7 +64,7 @@ def _file_md5(path: Path) -> str:
 
 
 def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int, seed: int,
-                   gap_dist: str = "t") -> str:
+                   gap_dist: str = "t", kp_n_regimes: int = 2) -> str:
     data_files = [
         Path(base_dir) / "dataset" / "train" / "nav_train.csv",
         Path(base_dir) / "dataset" / "train" / "gap_train_main.csv",
@@ -78,8 +78,9 @@ def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int
     h.update(json.dumps({
         "ar_order": list(ar_order), "S0": S0,
         "n_simulations": n_simulations, "seed": seed,
-        # 혁신항 분포가 바뀌면 GAP 경로가 달라지므로 캐시를 분리해야 한다
+        # 사양이 바뀌면 경로가 달라지므로 캐시를 분리해야 한다
         "gap_dist": gap_dist,
+        "kp_n_regimes": kp_n_regimes,
     }, sort_keys=True).encode())
     return h.hexdigest()
 
@@ -105,6 +106,13 @@ def _load_sim_cache(cache_dir: Path, key: str):
         return None, None
     arrs = dict(np.load(str(npz_path)))
     return arrs, meta
+
+
+def _regime_label(r: int, n_regimes: int) -> str:
+    """레짐 인덱스를 사람이 읽는 조건식으로. 2레짐과 3레짐의 레짐0 정의가 다르다."""
+    if n_regimes == 2:
+        return ["KP ≤ τ", "KP > τ"][r]
+    return ["|KP| ≤ τ", "KP > τ", "KP < -τ"][r]
 
 
 def _print_coverage(m):
@@ -141,6 +149,8 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="캐시 사용 안 함 (강제 재실행)")
     parser.add_argument("--gap-dist", choices=["t", "normal"], default="t",
                         help="GAP OU 혁신항 분포 (기본 t: 실제 괴리율의 두꺼운 꼬리 반영)")
+    parser.add_argument("--kp-regimes", type=int, choices=[2, 3], default=2,
+                        help="KP Threshold-OU 레짐 수 (기본 2: 역프리미엄 레짐 점유율 0%%)")
     args = parser.parse_args()
 
     base_dir = args.base_dir or str(_root)
@@ -166,7 +176,8 @@ def main():
     actual_nav = np.asarray(log_returns_to_nav(pd.Series(actual_returns), S0=S0)).flatten()
 
     # 캐시 체크
-    cache_key = _sim_cache_key(base_dir, ar_order, S0, args.n_simulations, args.seed, args.gap_dist)
+    cache_key = _sim_cache_key(base_dir, ar_order, S0, args.n_simulations, args.seed,
+                               args.gap_dist, args.kp_regimes)
     _skip_models = False
     cached_arrs, cached_meta = None, None
     if not args.no_cache:
@@ -373,8 +384,9 @@ def main():
         if kp_params_dict:
             print(f"  최적 임계값 τ: {kp_params_dict.get('threshold', 'N/A')}")
             rp = kp_params_dict.get("regime_params", {})
-            for r in [0, 1, 2]:
-                regime_name = ["|KP| ≤ τ", "KP > τ", "KP < -τ"][r]
+            _n_reg = kp_params_dict.get("n_regimes", len(rp)) or len(rp)
+            for r in range(_n_reg):
+                regime_name = _regime_label(r, _n_reg)
                 rd = rp.get(str(r), {})
                 print(f"    레짐 {r} ({regime_name}): "
                       f"κ={rd.get('kappa', 'N/A')}  μ={rd.get('mu', 'N/A')}")
@@ -388,12 +400,14 @@ def main():
             bitcoin_kr=bitcoin_kr_series,
             threshold=None,
             clip=3.0,
-            regularization=0.01
+            regularization=0.01,
+            n_regimes=args.kp_regimes,
         )
         print(f"  최적 임계값 τ: {kp_sim.threshold:.6f}")
+        print(f"  레짐 수: {kp_sim.n_regimes}")
         print(f"  레짐별 파라미터:")
-        for r in [0, 1, 2]:
-            regime_name = ["|KP| ≤ τ", "KP > τ", "KP < -τ"][r]
+        for r in range(kp_sim.n_regimes):
+            regime_name = _regime_label(r, kp_sim.n_regimes)
             print(f"    레짐 {r} ({regime_name}):")
             print(f"      κ_{r}: {kp_sim.regime_params[r]['kappa']:.6f}")
             print(f"      μ_{r}: {kp_sim.regime_params[r]['mu']:.6f}")
@@ -412,8 +426,9 @@ def main():
                     "delta2": kp_sim.delta2_regime[r],
                     "delta3": kp_sim.delta3_regime[r],
                 }
-                for r in [0, 1, 2]
+                for r in range(kp_sim.n_regimes)
             },
+            "n_regimes": kp_sim.n_regimes,
         }
 
         # KP-3) 몬테카를로 시뮬레이션
@@ -638,9 +653,11 @@ def main():
             "validation_metrics": kp_validation_metrics,
             "threshold_ou_params": {
                 "threshold": kp_params_dict.get("threshold"),
+                "n_regimes": kp_params_dict.get("n_regimes"),
                 "regime_params": {
                     r: kp_params_dict.get("regime_params", {}).get(str(r), {})
-                    for r in [0, 1, 2]
+                    for r in range(kp_params_dict.get("n_regimes",
+                                   len(kp_params_dict.get("regime_params", {}))) or 0)
                 },
             },
             "T": T_kp,

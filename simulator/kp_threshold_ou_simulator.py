@@ -30,13 +30,38 @@ def zscore_clip(x: np.ndarray, clip: float = 3.0) -> np.ndarray:
     return np.clip(z, -clip, clip)
 
 
-def get_regime(kp_t: float, threshold: float) -> int:
+# 레짐 수 기본값.
+#
+# 3레짐(|KP|<=tau / KP>tau / KP<-tau)이 원래 사양이었으나, 표본 기간(2024-01-12 ~
+# 2025-05-23) 중 김치프리미엄 최저치가 -2.57%로 -tau(-4.30%)에 닿지 않아 역프리미엄
+# 레짐의 점유율이 0%였다. 그 결과 해당 레짐 모수는 추정값이 아니라 fit_ou_regime의
+# 폴백 기본값(kappa=0.1, sigma0=전체 표준편차)이 되는데, 하필 회귀는 가장 느리고
+# 변동성은 가장 큰 조합이라 진입한 경로를 붙잡아두는 "함정" 레짐으로 작동했다.
+# 데이터에 근거가 없는 모수를 두는 대신 2레짐(KP<=tau / KP>tau)으로 축소한다.
+# 표준 SETAR 형태이며, KP가 음수로 가는 것 자체는 여전히 가능하다(레짐0 동학을 따름).
+DEFAULT_N_REGIMES = 2
+
+
+def get_regime(kp_t: float, threshold: float, n_regimes: int = DEFAULT_N_REGIMES) -> int:
+    """
+    2레짐: 0 = KP <= tau,      1 = KP > tau
+    3레짐: 0 = |KP| <= tau,    1 = KP > tau,   2 = KP < -tau
+    """
+    if n_regimes == 2:
+        return 1 if kp_t > threshold else 0
     if abs(kp_t) <= threshold:
         return 0
     elif kp_t > threshold:
         return 1
     else:
         return 2
+
+
+def regime_masks_for(kp: np.ndarray, threshold: float, n_regimes: int) -> Dict[int, np.ndarray]:
+    """레짐 인덱스 -> 불리언 마스크"""
+    if n_regimes == 2:
+        return {0: kp <= threshold, 1: kp > threshold}
+    return {0: np.abs(kp) <= threshold, 1: kp > threshold, 2: kp < -threshold}
 
 
 def fit_ou_regime(
@@ -107,7 +132,8 @@ def fit_threshold_ou(
     bitcoin_kr: pd.Series,
     threshold: float,
     clip: float = 3.0,
-    regularization: float = 0.01
+    regularization: float = 0.01,
+    n_regimes: int = DEFAULT_N_REGIMES
 ) -> Dict:
     kp = np.asarray(kp_series).flatten()
     vol_btc = np.asarray(volume_btc).flatten()
@@ -123,14 +149,11 @@ def fit_threshold_ou(
     kospi_z = zscore_clip(kospi, clip=clip)
     bitcoin_kr_z = zscore_clip(btc_kr, clip=clip)
 
-    regime_masks = {
-        0: np.abs(kp) <= threshold,
-        1: kp > threshold,
-        2: kp < -threshold
-    }
+    regimes = list(range(n_regimes))
+    regime_masks = regime_masks_for(kp, threshold, n_regimes)
 
     params_regime = {}
-    for r in [0, 1, 2]:
+    for r in regimes:
         params_regime[r] = fit_ou_regime(kp, regime_masks[r], r)
 
     delta_kp = np.diff(kp)
@@ -143,8 +166,9 @@ def fit_threshold_ou(
     delta2_regime = {}
     delta3_regime = {}
 
-    for r in [0, 1, 2]:
-        regime_mask_lag = np.array([get_regime(kp_lag[i], threshold) == r for i in range(len(kp_lag))])
+    for r in regimes:
+        regime_mask_lag = np.array([get_regime(kp_lag[i], threshold, n_regimes) == r
+                                    for i in range(len(kp_lag))])
 
         if np.sum(regime_mask_lag) < 5:
             delta1_regime[r] = 0.0
@@ -178,6 +202,7 @@ def fit_threshold_ou(
 
     return {
         'threshold': threshold,
+        'n_regimes': n_regimes,
         'regime_params': params_regime,
         'delta1_regime': delta1_regime,
         'delta2_regime': delta2_regime,
@@ -197,7 +222,8 @@ def select_optimal_threshold(
     kospi_vol: pd.Series,
     bitcoin_kr: pd.Series,
     threshold_candidates: np.ndarray = None,
-    clip: float = 3.0
+    clip: float = 3.0,
+    n_regimes: int = DEFAULT_N_REGIMES
 ) -> Tuple[float, Dict]:
     kp = np.asarray(kp_series).flatten()
 
@@ -216,17 +242,20 @@ def select_optimal_threshold(
 
     for tau in threshold_candidates:
         try:
-            result = fit_threshold_ou(kp_series, volume_btc, kospi_vol, bitcoin_kr, tau, clip=clip)
+            result = fit_threshold_ou(kp_series, volume_btc, kospi_vol, bitcoin_kr, tau,
+                                      clip=clip, n_regimes=n_regimes)
 
             kp_arr = np.asarray(kp_series)
-            n_params = 3 * 3 + 3 * 3
+            # 레짐당 OU 모수 3개(kappa, mu, sigma0) + 외생변수 계수 3개(delta1~3)
+            n_params = n_regimes * 3 + n_regimes * 3
 
             delta_kp = np.diff(kp_arr)
             kp_lag = kp_arr[:-1]
             ss_residual = 0.0
 
-            for r in [0, 1, 2]:
-                regime_mask = np.array([get_regime(kp_lag[i], tau) == r for i in range(len(kp_lag))])
+            for r in range(n_regimes):
+                regime_mask = np.array([get_regime(kp_lag[i], tau, n_regimes) == r
+                                        for i in range(len(kp_lag))])
                 if np.sum(regime_mask) > 0:
                     kappa_r = result['regime_params'][r]['kappa']
                     mu_r = result['regime_params'][r]['mu']
@@ -260,6 +289,8 @@ class KPThresholdOUSimulator:
     def __init__(self, fit_result: Dict, clip: float = 3.0):
         self.threshold = fit_result['threshold']
         self.regime_params = fit_result['regime_params']
+        # 레짐 수는 적합 결과에서 읽는다 (저장된 모수를 다시 로드할 때도 일관)
+        self.n_regimes = fit_result.get('n_regimes', len(self.regime_params))
         self.delta1_regime = fit_result['delta1_regime']
         self.delta2_regime = fit_result['delta2_regime']
         self.delta3_regime = fit_result['delta3_regime']
@@ -321,7 +352,7 @@ class KPThresholdOUSimulator:
             bitcoin_kr_z = np.clip(bitcoin_kr_z, -self.clip, self.clip)
 
         for t in range(T - 1):
-            r = get_regime(kp[t], self.threshold)
+            r = get_regime(kp[t], self.threshold, self.n_regimes)
             kappa_r = self.regime_params[r]['kappa']
             mu_r = self.regime_params[r]['mu']
             sigma0_r = self.regime_params[r]['sigma0']
@@ -349,16 +380,17 @@ def fit_kp_threshold_ou(
     bitcoin_kr: pd.Series,
     threshold: float = None,
     clip: float = 3.0,
-    regularization: float = 0.01
+    regularization: float = 0.01,
+    n_regimes: int = DEFAULT_N_REGIMES
 ) -> KPThresholdOUSimulator:
     if threshold is None:
         threshold, fit_result = select_optimal_threshold(
-            kp_series, volume_btc, kospi_vol, bitcoin_kr, clip=clip
+            kp_series, volume_btc, kospi_vol, bitcoin_kr, clip=clip, n_regimes=n_regimes
         )
     else:
         fit_result = fit_threshold_ou(
             kp_series, volume_btc, kospi_vol, bitcoin_kr, threshold,
-            clip=clip, regularization=regularization
+            clip=clip, regularization=regularization, n_regimes=n_regimes
         )
 
     return KPThresholdOUSimulator(fit_result, clip=clip)
