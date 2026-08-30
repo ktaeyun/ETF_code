@@ -673,9 +673,9 @@ def _base_row(base: dict) -> dict:
         "gap_nmpiw95":   gm.get("nmpiw95_price"),
         "gap_pit_ks_p":  gs.get("pit_ks", {}).get("ks_pvalue"),
         "kp_threshold":  kpp.get("threshold"),
-        "kp_kappa_r0":   kpp.get("regime_params", {}).get("0", {}).get("kappa"),
-        "kp_kappa_r1":   kpp.get("regime_params", {}).get("1", {}).get("kappa"),
-        "kp_kappa_r2":   kpp.get("regime_params", {}).get("2", {}).get("kappa"),
+        # 레짐 수는 사양에 따라 다르므로 존재하는 레짐만 담는다
+        **{f"kp_kappa_r{r}": v.get("kappa")
+           for r, v in sorted(kpp.get("regime_params", {}).items())},
         "kp_picp95":     km.get("picp95_price"),
         "kp_cov_err":    km.get("coverage_error_price"),
         "kp_nmpiw95":    km.get("nmpiw95_price"),
@@ -774,9 +774,8 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             # KP 임계값
             "kp_threshold":       p["kp_params"]["threshold"],
             # KP 레짐별 kappa
-            "kp_kappa_r0":        p["kp_params"]["regime_params"]["0"]["kappa"],
-            "kp_kappa_r1":        p["kp_params"]["regime_params"]["1"]["kappa"],
-            "kp_kappa_r2":        p["kp_params"]["regime_params"]["2"]["kappa"],
+            **{f"kp_kappa_r{r}": v["kappa"]
+               for r, v in sorted(p["kp_params"]["regime_params"].items())},
             # KP 검증
             "kp_picp95":          p["kp_metrics"].get("picp95_price"),
             "kp_cov_err":         p["kp_metrics"].get("coverage_error_price"),
