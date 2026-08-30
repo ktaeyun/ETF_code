@@ -22,7 +22,7 @@ simulator/scenario_main.py
   KP 모델:
     btc_volume_btc  → volume_btc
     VKOSPI_resid    → KOSPI_Volatility
-    bitcoin_kr      → 실제 데이터 유지 (HMM 외 변수)
+    bitcoin_kr      → 시나리오 레짐에서 생성 (domestic_btc_svi = KR_SVI)
 
 실행 예시
 ---------
@@ -142,7 +142,7 @@ def run_single_scenario(
 
     gap_series    = df_gap_hist["etf_premium"]
     kp_series     = df_kp_hist["Kimchi Premium"]
-    bitcoin_kr    = df_kp_hist["bitcoin_kr"]   # HMM 외 변수 → 실제 데이터 유지
+    bitcoin_kr    = df_kp_hist["bitcoin_kr"]   # 정규화 기준(mean/std)용 실제 데이터
 
     T_gap = len(gap_series)
     T_kp  = len(kp_series)
@@ -170,6 +170,10 @@ def run_single_scenario(
     vix_sc = pd.Series(_align(df_gap_exog_sc["Global_RV"].values,      T_gap))
     vol_sc = pd.Series(_align(df_kp_exog_sc["btc_volume_btc"].values,  T_kp))
     kv_sc  = pd.Series(_align(df_kp_exog_sc["VKOSPI_resid"].values,    T_kp))
+    # domestic_btc_svi(= bitcoin_kr, KR_SVI)도 시나리오를 정의하는 5개 레짐 변수 중 하나다.
+    # 이전에는 "HMM 외 변수"로 잘못 분류돼 실제 데이터를 그대로 썼고, 그 결과
+    # KR_SVI가 High인 시나리오(S02, S05 등)가 시뮬레이션에서 차별화되지 않았다.
+    bkr_sc = pd.Series(_align(df_kp_exog_sc["domestic_btc_svi"].values, T_kp))
 
     # ── 3. Base 모수 로드 (고정) ───────────────────────────────
     _sim_meta_path = _ROOT / "results" / "simulator" / "cache" / "sim_meta.json"
@@ -253,7 +257,7 @@ def run_single_scenario(
             T=T_kp, kp0=kp0,
             volume_btc_future=vol_sc.values,
             kospi_vol_future=kv_sc.values,
-            bitcoin_kr_future=bitcoin_kr.values,
+            bitcoin_kr_future=bkr_sc.values,
             seed=seed + 20000 + i,
         )).flatten()
         for i in range(n_simulations)

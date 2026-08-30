@@ -184,6 +184,7 @@ def _prepare_series(
         vix_arr = df_gap_hist["btc_volatility"].values
         vol_arr = df_kp_hist["volume_btc"].values
         kv_arr = df_kp_hist["KOSPI_Volatility"].values
+        bkr_arr = df_kp_hist["bitcoin_kr"].values
     else:  # 시나리오: 레짐 기반 생성 외생변수로 교체
         df_gap_sc = generate_scenario_series(hmm_results, scenario, T=T_gen, seed=seed, inverse=True)
         df_kp_sc = generate_scenario_series(hmm_results, scenario, T=T_gen, seed=seed, inverse=True)
@@ -191,13 +192,15 @@ def _prepare_series(
         vix_arr = _align(df_gap_sc["Global_RV"].values, T_gap)
         vol_arr = _align(df_kp_sc["btc_volume_btc"].values, T_kp)
         kv_arr = _align(df_kp_sc["VKOSPI_resid"].values, T_kp)
+        # domestic_btc_svi(= bitcoin_kr, KR_SVI)도 시나리오 정의 변수이므로 함께 교체한다
+        bkr_arr = _align(df_kp_sc["domestic_btc_svi"].values, T_kp)
 
     return {
         "actual_gap": np.asarray(gap_series).flatten(),
         "actual_kp": np.asarray(kp_series).flatten(),
         "T_gap": T_gap, "T_kp": T_kp,
         "si": si_arr, "vix": vix_arr, "vol": vol_arr, "kv": kv_arr,
-        "bkr": df_kp_hist["bitcoin_kr"].values,
+        "bkr": bkr_arr,
     }
 
 
