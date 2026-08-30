@@ -213,6 +213,8 @@ def run_single_scenario(
     _kp_rp = kp_p["regime_params"]
     kp_sim = KPThresholdOUSimulator({
         "threshold": kp_p["threshold"],
+        # 레짐 수는 Base 적합 결과를 그대로 따른다 (없으면 모수 개수로 추론)
+        "n_regimes": int(kp_p.get("n_regimes") or len(_kp_rp)),
         "regime_params": {
             int(r): {"kappa": v["kappa"], "mu": v["mu"], "sigma0": v["sigma0"]}
             for r, v in _kp_rp.items()
@@ -310,8 +312,9 @@ def run_single_scenario(
                     "delta2": kp_sim.delta2_regime[r],
                     "delta3": kp_sim.delta3_regime[r],
                 }
-                for r in [0, 1, 2]
+                for r in range(kp_sim.n_regimes)
             },
+            "n_regimes": kp_sim.n_regimes,
         },
         "gap_metrics": {
             k: float(v) for k, v in gap_metr.items()

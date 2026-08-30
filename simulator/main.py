@@ -146,7 +146,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="랜덤 시드")
     parser.add_argument("--out-dir", type=str, default=None, help="결과 저장 디렉터리 (기본: results/simulator)")
     parser.add_argument("--no-save", action="store_true", help="파일 저장 안 함")
-    parser.add_argument("--no-cache", action="store_true", help="캐시 사용 안 함 (강제 재실행)")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="저장된 캐시를 읽지 않고 강제 재실행 (결과는 그대로 저장됨)")
     parser.add_argument("--gap-dist", choices=["t", "normal"], default="t",
                         help="GAP OU 혁신항 분포 (기본 t: 실제 괴리율의 두꺼운 꼬리 반영)")
     parser.add_argument("--kp-regimes", type=int, choices=[2, 3], default=2,
@@ -446,8 +447,13 @@ def main():
             all_kp.append(np.asarray(sim_kp).flatten())
         monte_carlo_kp_array = np.array(all_kp)
 
-        # 캐시 저장 (최초 실행 시 모든 MC 완료 후)
-        if not args.no_cache:
+        # 캐시 저장.
+        #
+        # --no-cache는 "저장된 결과를 읽지 않는다"는 뜻이지 "저장하지 않는다"가 아니다.
+        # 저장까지 막으면 sim_meta.json이 낡은 채로 남고, 이를 Base 모수의 출처로
+        # 삼는 scenario_main.py / results_main.py가 옛 사양으로 Phase 2를 돌리게 된다.
+        # (실제로 KP 2레짐 전환 직후 이 경로로 3레짐 모수가 시나리오에 흘러들었다.)
+        if not args.no_save:
             _save_sim_cache(cache_dir, cache_key, {
                 "mc_nav_ret": monte_carlo_returns_array,
                 "mc_nav": monte_carlo_nav_array,
