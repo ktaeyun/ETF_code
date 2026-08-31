@@ -415,8 +415,18 @@ def compute_risk_metrics(mc_array: np.ndarray, actual: np.ndarray,
     # 종단 분포 (terminal distribution)
     terminal = mc_array[:, -1]
 
-    # 경로별 변화량 (수익률)
-    returns  = np.diff(mc_array, axis=1)          # (N, T-1)
+    # 경로별 로그수익률.
+    #
+    # 이전에는 절대 차분 np.diff(mc_array)를 썼는데, 그러면 지표가 변동성이 아니라
+    # 가격 수준에 끌려간다. 실측된 문제:
+    #   - 가격이 오를수록 절대 변동폭도 커져 기간 뒷부분이 계산을 지배한다
+    #     (4분기 기여 46.9% 대 1분기 9.9%. 로그수익률은 25%씩 균등)
+    #   - 경로별 변동성과 최종가격의 상관이 +0.919로, 사실상 가격 수준을 재게 된다
+    #     (로그수익률 기준 +0.172)
+    #   - 단위가 원이라 측정 기준(전체 ETF / 한국 요인)이 다르면 값을 비교할 수 없다
+    # 로그수익률은 무단위이고 수준에 불변이라 이 세 문제가 모두 사라진다.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        returns = np.diff(np.log(np.maximum(mc_array, 1e-12)), axis=1)   # (N, T-1)
 
     # ── 분포 지표 ──────────────────────────────────────────
     var_95   = float(np.percentile(terminal, alpha * 100))
@@ -430,9 +440,9 @@ def compute_risk_metrics(mc_array: np.ndarray, actual: np.ndarray,
     drawdowns = (mc_array - cummax) / (np.abs(cummax) + 1e-12)
     max_dd   = float(drawdowns.min(axis=1).mean())           # 평균 MDD
 
-    # 변동성 (경로별 변화량의 표준편차 평균)
+    # 변동성 (경로별 로그수익률 표준편차의 평균, 무단위)
     vol_paths = returns.std(axis=1)
-    vol_mean  = float(vol_paths.mean())
+    vol_mean  = float(np.nanmean(vol_paths))
 
     # 실제값과의 median 괴리
     median_path = np.median(mc_array, axis=0)
