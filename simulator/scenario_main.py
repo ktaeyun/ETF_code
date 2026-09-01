@@ -56,7 +56,7 @@ from simulator.data_loader import load_gap_exog, load_kp_exog
 from simulator.gap_ou_simulator import GapOUSimulator
 from simulator.kp_threshold_ou_simulator import KPThresholdOUSimulator
 from simulator.visualizer import create_all_visualizations
-from simulator.metrics import calculate_statistical_tests, calculate_all_metrics
+from simulator.metrics import calculate_statistical_tests
 
 # ── 경로 상수 ─────────────────────────────────────────────────
 SCENARIO_CSV   = _ROOT / "results" / "scenario_selection" / "final_scenarios_latest.csv"
@@ -217,6 +217,8 @@ def run_single_scenario(
     _kp_rp = kp_p["regime_params"]
     kp_sim = KPThresholdOUSimulator({
         "threshold": kp_p["threshold"],
+        # 혁신항 분포도 Base 적합 결과를 그대로 따른다 (없으면 정규)
+        "nu": kp_p.get("nu"),
         # 레짐 수는 Base 적합 결과를 그대로 따른다 (없으면 모수 개수로 추론)
         "n_regimes": int(kp_p.get("n_regimes") or len(_kp_rp)),
         "regime_params": {
@@ -233,7 +235,8 @@ def run_single_scenario(
         "bitcoin_kr_mean":  float(np.mean(_bkr_raw)),
         "bitcoin_kr_std":   float(np.std(_bkr_raw)),
     }, clip=3.0)
-    _pr(f"  [KP]  Base 모수 고정  threshold={kp_sim.threshold:.6f}")
+    _pr(f"  [KP]  Base 모수 고정  threshold={kp_sim.threshold:.6f}"
+        + (f"  ν={kp_sim.nu:.4f}" if kp_sim.nu is not None else "  (정규 혁신항)"))
 
     # ── 5. GAP Monte Carlo ─────────────────────────────────────
     _pr(f"\n  [GAP] Monte Carlo (n={n_simulations}, T={T_gap})")
@@ -270,27 +273,28 @@ def run_single_scenario(
     rep_gap_ch    = np.diff(rep_gap)
 
     gap_stat  = calculate_statistical_tests(actual_gap_ch, mc_gap_ch)
-    gap_metr  = calculate_all_metrics(
-        actual_nav=actual_gap, simulated_nav=rep_gap,
-        actual_returns=actual_gap_ch, simulated_returns=rep_gap_ch,
-        monte_carlo_nav_paths=mc_gap, monte_carlo_returns_paths=mc_gap_ch,
-    )
+
     actual_kp_ch = np.diff(actual_kp)
     mc_kp_ch     = np.diff(mc_kp, axis=1)
     rep_kp_ch    = np.diff(rep_kp)
 
     kp_stat   = calculate_statistical_tests(actual_kp_ch, mc_kp_ch)
-    kp_metr   = calculate_all_metrics(
-        actual_nav=actual_kp, simulated_nav=rep_kp,
-        actual_returns=actual_kp_ch, simulated_returns=rep_kp_ch,
-        monte_carlo_nav_paths=mc_kp, monte_carlo_returns_paths=mc_kp_ch,
-    )
-    _pr(f"\n  [GAP 결과]  PICP95={gap_metr.get('picp95_price', float('nan')):.4f}  CovErr={gap_metr.get('coverage_error_price', float('nan')):.4f}  "
-        f"NMPIW95={gap_metr.get('nmpiw95_price', float('nan')):.4f}  "
-        f"PIT-KS p={gap_stat['pit_ks']['ks_pvalue']:.4f}")
-    _pr(f"  [KP  결과]  PICP95={kp_metr.get('picp95_price', float('nan')):.4f}  CovErr={kp_metr.get('coverage_error_price', float('nan')):.4f}  "
-        f"NMPIW95={kp_metr.get('nmpiw95_price', float('nan')):.4f}  "
-        f"PIT-KS p={kp_stat['pit_ks']['ks_pvalue']:.4f}")
+
+    def _test_row(st: dict) -> dict:
+        """세 검정의 p-value와 종합 판정. 시나리오 비교표의 검증 컬럼이 된다."""
+        es = st.get("es", {})
+        return {
+            "pit_ks_p": float(st["pit_ks"]["ks_pvalue"]),
+            "kupiec_p": float(st["kupiec"]["pvalue"]),
+            "es_p":     (float(es["pvalue"]) if es.get("pvalue") is not None else None),
+            "is_valid": bool(st["is_valid"]),
+        }
+
+    gap_tests, kp_tests = _test_row(gap_stat), _test_row(kp_stat)
+    for _tag, _tr in (("GAP", gap_tests), ("KP ", kp_tests)):
+        _es_p = f"{_tr['es_p']:.4f}" if _tr["es_p"] is not None else "  N/A"
+        _pr(f"  [{_tag} 결과]  PIT-KS p={_tr['pit_ks_p']:.4f}  "
+            f"Kupiec p={_tr['kupiec_p']:.4f}  ES p={_es_p}  VALID={_tr['is_valid']}")
 
     # ── 8. 저장 ────────────────────────────────────────────────
     # 파라미터 JSON
@@ -319,17 +323,11 @@ def run_single_scenario(
                 for r in range(kp_sim.n_regimes)
             },
             "n_regimes": kp_sim.n_regimes,
+            "nu": kp_sim.nu,
         },
-        "gap_metrics": {
-            k: float(v) for k, v in gap_metr.items()
-            if isinstance(v, (int, float, np.floating))
-        },
-        "kp_metrics": {
-            k: float(v) for k, v in kp_metr.items()
-            if isinstance(v, (int, float, np.floating))
-        },
-        "gap_pit_ks_pvalue": float(gap_stat["pit_ks"]["ks_pvalue"]),
-        "kp_pit_ks_pvalue":  float(kp_stat["pit_ks"]["ks_pvalue"]),
+        # 검증은 프레임워크가 규정한 세 검정만 남긴다 (커버리지 지표는 metrics.py에서 제거)
+        "gap_tests": gap_tests,
+        "kp_tests":  kp_tests,
     }
     with open(out_dir / "params_and_metrics.json", "w", encoding="utf-8") as f:
         json.dump(_to_serializable(params_out), f, ensure_ascii=False, indent=2)
@@ -372,8 +370,6 @@ def run_single_scenario(
         "rep_kp":        rep_kp,
         "actual_gap":    actual_gap,
         "actual_kp":     actual_kp,
-        "gap_metrics":   gap_metr,
-        "kp_metrics":    kp_metr,
         "gap_stat":      gap_stat,
         "kp_stat":       kp_stat,
         "params_out":    params_out,
@@ -670,10 +666,20 @@ def _base_row(base: dict) -> dict:
     kp  = v.get("kp", {})
     ou  = gp.get("ou_params", {})
     kpp = kp.get("threshold_ou_params", {})
-    gm  = gp.get("validation_metrics", {})
-    km  = kp.get("validation_metrics", {})
     gs  = gp.get("statistical_tests", {})
     ks  = kp.get("statistical_tests", {})
+
+    # 커버리지 지표는 제거됐다. Base 도 시나리오와 같은 세 검정으로 비교한다.
+    def _tests_of(st: dict) -> dict:
+        es = st.get("es", {})
+        return {
+            "pit_ks_p": st.get("pit_ks", {}).get("ks_pvalue"),
+            "kupiec_p": st.get("kupiec", {}).get("pvalue"),
+            "es_p":     es.get("pvalue"),
+            "is_valid": st.get("is_valid"),
+        }
+
+    _gt, _kt = _tests_of(gs), _tests_of(ks)
 
     return {
         "Scenario_ID":   "Base",
@@ -682,18 +688,20 @@ def _base_row(base: dict) -> dict:
         "gap_sigma0":    ou.get("sigma0"),
         "gap_delta1_SI": ou.get("delta1"),
         "gap_delta2_VIX":ou.get("delta2"),
-        "gap_picp95":    gm.get("picp95_price"),
-        "gap_cov_err":   gm.get("coverage_error_price"),
-        "gap_nmpiw95":   gm.get("nmpiw95_price"),
-        "gap_pit_ks_p":  gs.get("pit_ks", {}).get("ks_pvalue"),
+        "gap_nu":        ou.get("nu"),
+        "gap_pit_ks_p":  _gt["pit_ks_p"],
+        "gap_kupiec_p":  _gt["kupiec_p"],
+        "gap_es_p":      _gt["es_p"],
+        "gap_valid":     _gt["is_valid"],
         "kp_threshold":  kpp.get("threshold"),
+        "kp_nu":         kpp.get("nu"),
         # 레짐 수는 사양에 따라 다르므로 존재하는 레짐만 담는다
         **{f"kp_kappa_r{r}": v.get("kappa")
            for r, v in sorted(kpp.get("regime_params", {}).items())},
-        "kp_picp95":     km.get("picp95_price"),
-        "kp_cov_err":    km.get("coverage_error_price"),
-        "kp_nmpiw95":    km.get("nmpiw95_price"),
-        "kp_pit_ks_p":   ks.get("pit_ks", {}).get("ks_pvalue"),
+        "kp_pit_ks_p":   _kt["pit_ks_p"],
+        "kp_kupiec_p":   _kt["kupiec_p"],
+        "kp_es_p":       _kt["es_p"],
+        "kp_valid":      _kt["is_valid"],
     }
 
 
@@ -780,21 +788,23 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             "gap_sigma0":         p["gap_params"]["sigma0"],
             "gap_delta1_SI":      p["gap_params"]["delta1"],
             "gap_delta2_VIX":     p["gap_params"]["delta2"],
+            "gap_nu":             p["gap_params"].get("nu"),
             # GAP 검증
-            "gap_picp95":         p["gap_metrics"].get("picp95_price"),
-            "gap_cov_err":        p["gap_metrics"].get("coverage_error_price"),
-            "gap_nmpiw95":        p["gap_metrics"].get("nmpiw95_price"),
-            "gap_pit_ks_p":       p["gap_pit_ks_pvalue"],
+            "gap_pit_ks_p":       p["gap_tests"]["pit_ks_p"],
+            "gap_kupiec_p":       p["gap_tests"]["kupiec_p"],
+            "gap_es_p":           p["gap_tests"]["es_p"],
+            "gap_valid":          p["gap_tests"]["is_valid"],
             # KP 임계값
             "kp_threshold":       p["kp_params"]["threshold"],
+            "kp_nu":              p["kp_params"].get("nu"),
             # KP 레짐별 kappa
             **{f"kp_kappa_r{r}": v["kappa"]
                for r, v in sorted(p["kp_params"]["regime_params"].items())},
             # KP 검증
-            "kp_picp95":          p["kp_metrics"].get("picp95_price"),
-            "kp_cov_err":         p["kp_metrics"].get("coverage_error_price"),
-            "kp_nmpiw95":         p["kp_metrics"].get("nmpiw95_price"),
-            "kp_pit_ks_p":        p["kp_pit_ks_pvalue"],
+            "kp_pit_ks_p":        p["kp_tests"]["pit_ks_p"],
+            "kp_kupiec_p":        p["kp_tests"]["kupiec_p"],
+            "kp_es_p":            p["kp_tests"]["es_p"],
+            "kp_valid":           p["kp_tests"]["is_valid"],
         })
     df = pd.DataFrame(rows)
     numeric_cols = df.select_dtypes(include=[float, int]).columns
@@ -1047,9 +1057,9 @@ def main():
     print(comparison_df[[
         "Scenario_ID",
         "gap_kappa", "gap_mu", "gap_sigma0",
-        "gap_picp95", "gap_cov_err", "gap_pit_ks_p",
+        "gap_pit_ks_p", "gap_kupiec_p", "gap_es_p", "gap_valid",
         "kp_threshold",
-        "kp_picp95", "kp_cov_err", "kp_pit_ks_p",
+        "kp_pit_ks_p", "kp_kupiec_p", "kp_es_p", "kp_valid",
     ]].to_string(index=False))
     print(f"\n  비교 요약 저장: {comparison_path}")
 

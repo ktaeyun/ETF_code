@@ -30,7 +30,7 @@ from simulator.arima_garch_t_nav_simulator import (
 from simulator.gap_ou_simulator import fit_gap_ou
 from simulator.kp_threshold_ou_simulator import fit_kp_threshold_ou
 from simulator.visualizer import create_all_visualizations
-from simulator.metrics import calculate_statistical_tests, calculate_all_metrics
+from simulator.metrics import calculate_statistical_tests
 
 
 def _to_serializable(obj):
@@ -64,7 +64,8 @@ def _file_md5(path: Path) -> str:
 
 
 def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int, seed: int,
-                   gap_dist: str = "t", kp_n_regimes: int = 2) -> str:
+                   gap_dist: str = "t", kp_n_regimes: int = 2,
+                   kp_dist: str = "t") -> str:
     data_files = [
         Path(base_dir) / "dataset" / "train" / "nav_train.csv",
         Path(base_dir) / "dataset" / "train" / "gap_train_main.csv",
@@ -81,6 +82,7 @@ def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int
         # 사양이 바뀌면 경로가 달라지므로 캐시를 분리해야 한다
         "gap_dist": gap_dist,
         "kp_n_regimes": kp_n_regimes,
+        "kp_dist": kp_dist,
     }, sort_keys=True).encode())
     return h.hexdigest()
 
@@ -115,26 +117,18 @@ def _regime_label(r: int, n_regimes: int) -> str:
     return ["|KP| ≤ τ", "KP > τ", "KP < -τ"][r]
 
 
-def _print_coverage(m):
-    """예측구간 커버리지 출력. 판정은 명목수준이 아니라 모형 내재 기준분포의 백분위로 한다."""
-    for label, key, pct_key in [
-        ("PICP50 ", "picp50_price", "picp50_pct_price"),
-        ("PICP95 ", "picp95_price", "picp95_pct_price"),
-        ("CovErr ", "coverage_error_price", "coverage_error_pct_price"),
-    ]:
-        val, pct = m.get(key), m.get(pct_key)
-        if not isinstance(val, (int, float)):
-            continue
-        if isinstance(pct, (int, float)) and np.isfinite(pct):
-            verdict = "정상" if 5.0 <= pct <= 95.0 else "이상"
-            print(f"  {label}: {val:7.4f}   모형 기준분포의 {pct:5.1f} 백분위  [{verdict}]")
-        else:
-            print(f"  {label}: {val:7.4f}")
-    for label, key in [("NMPIW95", "nmpiw95_price"), ("PICP95 Vol", "picp95_vol"),
-                       ("CovErr Vol", "coverage_error_vol")]:
-        val = m.get(key)
-        if isinstance(val, (int, float)):
-            print(f"  {label}: {val:7.4f}")
+def _print_es(es):
+    """ES 검정 결과 출력. tail_error 는 부호를 갖는 통계량이라 양측 검정이다."""
+    te = es.get("tail_error")
+    if te is None:
+        print("  ES: 위반일 0건 -> tail_error 정의 불가 (판정 불가)")
+        return
+    p, pct = es.get("pvalue", float("nan")), es.get("percentile", float("nan"))
+    verdict = "통과" if es.get("is_valid") else "기각"
+    print(f"  ES: tail_error={te:+.6f}  p={p:.4f}  (기준분포 {pct:.1f} 백분위)  [{verdict}]")
+    print(f"      기준분포 5/50/95 = {es.get('ref_p5', float('nan')):+.6f} / "
+          f"{es.get('ref_p50', float('nan')):+.6f} / {es.get('ref_p95', float('nan')):+.6f}"
+          f"   위반일 {es.get('n_violations')}건, 유효표본 {es.get('n_ref_effective')}")
 
 
 def main():
@@ -152,6 +146,8 @@ def main():
                         help="GAP OU 혁신항 분포 (기본 t: 실제 괴리율의 두꺼운 꼬리 반영)")
     parser.add_argument("--kp-regimes", type=int, choices=[2, 3], default=2,
                         help="KP Threshold-OU 레짐 수 (기본 2: 역프리미엄 레짐 점유율 0%%)")
+    parser.add_argument("--kp-dist", choices=["t", "normal"], default="t",
+                        help="KP Threshold-OU 혁신항 분포 (기본 t: 정규에서는 ES 검정 기각)")
     args = parser.parse_args()
 
     base_dir = args.base_dir or str(_root)
@@ -178,7 +174,7 @@ def main():
 
     # 캐시 체크
     cache_key = _sim_cache_key(base_dir, ar_order, S0, args.n_simulations, args.seed,
-                               args.gap_dist, args.kp_regimes)
+                               args.gap_dist, args.kp_regimes, args.kp_dist)
     _skip_models = False
     cached_arrs, cached_meta = None, None
     if not args.no_cache:
@@ -220,22 +216,8 @@ def main():
     )
     print(f"  PIT-KS: statistic={statistical_tests['pit_ks']['ks_statistic']:.4f}, p-value={statistical_tests['pit_ks']['ks_pvalue']:.4f}")
     print(f"  VaR-Kupiec: LR_uc={statistical_tests['kupiec']['lr_uc']:.4f}, p-value={statistical_tests['kupiec']['pvalue']:.4f}, exceedance_rate={statistical_tests['kupiec']['exceedance_rate']:.4f}")
-    es = statistical_tests['es']
-    print(f"  ES: tail_error={es.get('tail_error')}, n_violations={es.get('n_violations')}")
+    _print_es(statistical_tests['es'])
     print(f"  VALID: {statistical_tests['is_valid']}")
-
-    # 5) 검증 지표 (예측구간 커버리지, DTW, PMC, RVR, VVS, VPR, VJC, TWAD, KS, VaR/ES 등)
-    print("\n[5단계] 검증 지표 계산 (예측구간 커버리지 등)")
-    validation_metrics = calculate_all_metrics(
-        actual_nav=actual_nav,
-        simulated_nav=representative_nav,
-        actual_returns=actual_returns,
-        simulated_returns=representative_returns,
-        monte_carlo_nav_paths=monte_carlo_nav_array,
-        monte_carlo_returns_paths=monte_carlo_returns_array,
-    )
-    v = validation_metrics
-    _print_coverage(v)
 
     # 6) 시각화 (NAV)
     print("\n[6단계] NAV 시각화")
@@ -332,20 +314,8 @@ def main():
     )
     print(f"  PIT-KS: statistic={gap_statistical_tests['pit_ks']['ks_statistic']:.4f}, p-value={gap_statistical_tests['pit_ks']['ks_pvalue']:.4f}")
     print(f"  VaR-Kupiec: LR_uc={gap_statistical_tests['kupiec']['lr_uc']:.4f}, p-value={gap_statistical_tests['kupiec']['pvalue']:.4f}")
+    _print_es(gap_statistical_tests['es'])
     print(f"  VALID: {gap_statistical_tests['is_valid']}")
-    
-    # GAP-5) 검증 지표 및 예측구간 커버리지
-    print("\n[GAP-5단계] 검증 지표 계산")
-    gap_validation_metrics = calculate_all_metrics(
-        actual_nav=actual_gap,
-        simulated_nav=representative_gap,
-        actual_returns=actual_gap_changes,
-        simulated_returns=representative_gap_changes,
-        monte_carlo_nav_paths=monte_carlo_gap_array,
-        monte_carlo_returns_paths=simulated_gap_changes_array,
-    )
-    v_gap = gap_validation_metrics
-    _print_coverage(v_gap)
     
     # GAP-6) 시각화
     print("\n[GAP-6단계] 시각화")
@@ -385,7 +355,10 @@ def main():
         if kp_params_dict:
             print(f"  최적 임계값 τ: {kp_params_dict.get('threshold', 'N/A')}")
             rp = kp_params_dict.get("regime_params", {})
-            _n_reg = kp_params_dict.get("n_regimes", len(rp)) or len(rp)
+            _n_reg = int(kp_params_dict.get("n_regimes", len(rp)) or len(rp))
+            _kp_nu = kp_params_dict.get("nu")
+            print(f"  ν: {_kp_nu:.4f}" if isinstance(_kp_nu, (int, float))
+                  else "  (정규 혁신항)")
             for r in range(_n_reg):
                 regime_name = _regime_label(r, _n_reg)
                 rd = rp.get(str(r), {})
@@ -403,9 +376,15 @@ def main():
             clip=3.0,
             regularization=0.01,
             n_regimes=args.kp_regimes,
+            dist=args.kp_dist,
         )
         print(f"  최적 임계값 τ: {kp_sim.threshold:.6f}")
         print(f"  레짐 수: {kp_sim.n_regimes}")
+        if kp_sim.nu is not None:
+            print(f"  ν={kp_sim.nu:.4f}  (레짐 공통 Student-t 혁신항, 초과첨도 "
+                  + (f"{6/(kp_sim.nu-4):.2f})" if kp_sim.nu > 4 else "무한)"))
+        else:
+            print("  (정규 혁신항)")
         print(f"  레짐별 파라미터:")
         for r in range(kp_sim.n_regimes):
             regime_name = _regime_label(r, kp_sim.n_regimes)
@@ -430,6 +409,7 @@ def main():
                 for r in range(kp_sim.n_regimes)
             },
             "n_regimes": kp_sim.n_regimes,
+            "nu": kp_sim.nu,
         }
 
         # KP-3) 몬테카를로 시뮬레이션
@@ -480,20 +460,8 @@ def main():
     )
     print(f"  PIT-KS: statistic={kp_statistical_tests['pit_ks']['ks_statistic']:.4f}, p-value={kp_statistical_tests['pit_ks']['ks_pvalue']:.4f}")
     print(f"  VaR-Kupiec: LR_uc={kp_statistical_tests['kupiec']['lr_uc']:.4f}, p-value={kp_statistical_tests['kupiec']['pvalue']:.4f}")
+    _print_es(kp_statistical_tests['es'])
     print(f"  VALID: {kp_statistical_tests['is_valid']}")
-    
-    # KP-5) 검증 지표 및 예측구간 커버리지
-    print("\n[KP-5단계] 검증 지표 계산")
-    kp_validation_metrics = calculate_all_metrics(
-        actual_nav=actual_kp,
-        simulated_nav=representative_kp,
-        actual_returns=actual_kp_changes,
-        simulated_returns=representative_kp_changes,
-        monte_carlo_nav_paths=monte_carlo_kp_array,
-        monte_carlo_returns_paths=simulated_kp_changes_array,
-    )
-    v_kp = kp_validation_metrics
-    _print_coverage(v_kp)
     
     # KP-6) 시각화
     print("\n[KP-6단계] 시각화")
@@ -562,22 +530,8 @@ def main():
 
     print(f"  PIT-KS: statistic={combined_statistical_tests['pit_ks']['ks_statistic']:.4f}, p-value={combined_statistical_tests['pit_ks']['ks_pvalue']:.4f}")
     print(f"  VaR-Kupiec: LR_uc={combined_statistical_tests['kupiec']['lr_uc']:.4f}, p-value={combined_statistical_tests['kupiec']['pvalue']:.4f}, exceedance_rate={combined_statistical_tests['kupiec']['exceedance_rate']:.4f}")
-    es_combined = combined_statistical_tests['es']
-    print(f"  ES: tail_error={es_combined.get('tail_error')}, n_violations={es_combined.get('n_violations')}")
+    _print_es(combined_statistical_tests['es'])
     print(f"  VALID: {combined_statistical_tests['is_valid']}")
-
-    # 보조 진단: 예측구간 커버리지
-    print("\n[Step 6-보조] 검증 지표 계산 (예측구간 커버리지 등)")
-    combined_validation_metrics = calculate_all_metrics(
-        actual_nav=actual_combined,
-        simulated_nav=representative_combined,
-        actual_returns=actual_combined_returns,
-        simulated_returns=representative_combined_returns,
-        monte_carlo_nav_paths=monte_carlo_combined_array,
-        monte_carlo_returns_paths=simulated_combined_returns_array,
-    )
-    v_combined = combined_validation_metrics
-    _print_coverage(v_combined)
 
     # 시각화
     print("\n[Step 6-보조] 시각화")
@@ -637,13 +591,11 @@ def main():
     validation_results = {
         "nav": {
             "statistical_tests": statistical_tests,
-            "validation_metrics": validation_metrics,
             "T": T,
             "S0": S0,
         },
         "gap": {
             "statistical_tests": gap_statistical_tests,
-            "validation_metrics": gap_validation_metrics,
             "ou_params": {
                 "kappa":  gap_params_dict.get("kappa"),
                 "mu":     gap_params_dict.get("mu"),
@@ -656,21 +608,20 @@ def main():
         },
         "kp": {
             "statistical_tests": kp_statistical_tests,
-            "validation_metrics": kp_validation_metrics,
             "threshold_ou_params": {
                 "threshold": kp_params_dict.get("threshold"),
                 "n_regimes": kp_params_dict.get("n_regimes"),
+                "nu": kp_params_dict.get("nu"),
                 "regime_params": {
                     r: kp_params_dict.get("regime_params", {}).get(str(r), {})
-                    for r in range(kp_params_dict.get("n_regimes",
-                                   len(kp_params_dict.get("regime_params", {}))) or 0)
+                    for r in range(int(kp_params_dict.get("n_regimes",
+                                   len(kp_params_dict.get("regime_params", {}))) or 0))
                 },
             },
             "T": T_kp,
         },
         "combined": {
             "statistical_tests": combined_statistical_tests,
-            "validation_metrics": combined_validation_metrics,
             "T": min_T,
         },
         "n_simulations": args.n_simulations,
@@ -728,7 +679,6 @@ def main():
         "nav": {
             "simulator": sim if not _skip_models else None,
             "statistical_tests": statistical_tests,
-            "validation_metrics": validation_metrics,
             "representative_returns": representative_returns,
             "representative_nav": representative_nav,
             "actual_nav": actual_nav,
@@ -739,7 +689,6 @@ def main():
         "gap": {
             "simulator": gap_sim if not _skip_models else None,
             "statistical_tests": gap_statistical_tests,
-            "validation_metrics": gap_validation_metrics,
             "representative_gap": representative_gap,
             "actual_gap": actual_gap,
             "T": T_gap,
@@ -747,14 +696,12 @@ def main():
         "kp": {
             "simulator": kp_sim if not _skip_models else None,
             "statistical_tests": kp_statistical_tests,
-            "validation_metrics": kp_validation_metrics,
             "representative_kp": representative_kp,
             "actual_kp": actual_kp,
             "T": T_kp,
         },
         "combined": {
             "statistical_tests": combined_statistical_tests,
-            "validation_metrics": combined_validation_metrics,
             "representative_combined": representative_combined,
             "actual_combined": actual_combined,
             "T": min_T,

@@ -173,6 +173,8 @@ def _load_fixed_gap_kp_simulators() -> tuple[GapOUSimulator, KPThresholdOUSimula
     _log_vol_raw = np.log(df_kp_hist["volume_btc"].values + 1e-8)
     kp_sim = KPThresholdOUSimulator({
         "threshold": kp_p["threshold"],
+        # 혁신항 분포도 Base 적합 결과를 그대로 따른다 (없으면 정규)
+        "nu": kp_p.get("nu"),
         "regime_params": {
             int(r): {"kappa": v["kappa"], "mu": v["mu"], "sigma0": v["sigma0"]}
             for r, v in kp_rp.items()

@@ -2,8 +2,14 @@
 시뮬레이터 검증 지표 모듈
 
 연구 프레임워크 Step 4(개별 시뮬레이터 검증) / Step 6(통합 시뮬레이터 검증)에서 쓰인다.
-  - 본 검증: PIT-KS, VaR-Kupiec, ES  -> calculate_statistical_tests()
-  - 보조 진단: 예측구간 커버리지(PICP/NMPIW) -> calculate_all_metrics()
+검증 지표는 프레임워크가 규정한 세 검정뿐이다 -> calculate_statistical_tests()
+  - PIT-KS      : 시점 조건부 분포 적합
+  - VaR-Kupiec  : VaR 초과 빈도
+  - ES          : 꼬리 손실 크기 (모수적 부트스트랩으로 p-value 산출)
+
+예측구간 커버리지(PICP/NMPIW/CovErr)는 제거했다. 예측구간 품질 평가 지표
+(Khosravi et al. 2011)로 본 연구의 경로 생성 목적과 맞지 않고, ES 가 검정 능력을
+갖게 되면서 꼬리 진단 역할도 ES 로 흡수됐다.
 """
 
 import numpy as np
@@ -13,167 +19,70 @@ from scipy.stats import kstest, chi2
 from statsmodels.tsa.stattools import acf
 
 
-def interval_coverage(actual, simulated_paths, levels=(0.50, 0.80, 0.95)):
+def reference_distribution(simulated_paths, statistic_fn, n_ref=2000, seed=42):
     """
-    예측구간 커버리지 (PICP, Prediction Interval Coverage Probability)
+    모형 내재 기준분포 (모수적 부트스트랩 / 사후예측검정)
 
-    각 시점 t에서 몬테카를로 경로의 분위수로 명목 (1-alpha) 예측구간을 구성하고,
-    실제 관측치가 그 구간 안에 들어간 시점의 비율(경험적 커버리지)을 센다.
-    경험적 커버리지가 명목수준에 가까울수록 분포 예측이 잘 보정된 것이다.
+    "모형이 옳다"는 전제에서 어떤 통계량이 가질 수 있는 값들의 분포를 만든다.
+    시뮬레이션 경로 하나를 관측치인 척 꺼내 통계량을 계산하는 일을 n_ref번 반복한다.
 
-    커버리지만 보면 구간을 넓게 잡을수록 유리하므로, 구간폭을 실제 시계열의
-    변동범위로 정규화한 NMPIW를 함께 보고한다(낮을수록 좁고 예리한 구간).
-
-    Args:
-        actual: 실제 시계열 (T,)
-        simulated_paths: 몬테카를로 경로 (N x T)
-        levels: 명목 신뢰수준 리스트
-
-    Returns:
-        dict:
-            'picp'           {level: 경험적 커버리지}   명목수준에 가까울수록 좋음
-            'coverage_error' mean |경험적 - 명목|        낮을수록 좋음
-            'nmpiw'          {level: 정규화 평균 구간폭} 낮을수록 좋음
-    """
-    actual = np.asarray(actual, dtype=float)
-    paths = np.asarray(simulated_paths, dtype=float)
-
-    if paths.ndim != 2:
-        raise ValueError(f"simulated_paths는 (N x T) 2차원이어야 한다: ndim={paths.ndim}")
-
-    T = min(len(actual), paths.shape[1])
-    actual = actual[:T]
-    paths = paths[:, :T]
-
-    valid = np.isfinite(actual)
-    if valid.sum() == 0 or paths.shape[0] == 0:
-        nan_by_level = {lv: np.nan for lv in levels}
-        return {'picp': nan_by_level, 'coverage_error': np.nan, 'nmpiw': dict(nan_by_level)}
-
-    # 구간폭 정규화 기준: 실제 시계열의 변동범위 (0이면 정규화 생략)
-    span = np.nanmax(actual[valid]) - np.nanmin(actual[valid])
-
-    picp, nmpiw, errors = {}, {}, []
-    for lv in levels:
-        alpha = 1.0 - lv
-        lower = np.nanquantile(paths, alpha / 2.0, axis=0)
-        upper = np.nanquantile(paths, 1.0 - alpha / 2.0, axis=0)
-
-        inside = (actual >= lower) & (actual <= upper) & valid
-        emp = inside.sum() / valid.sum()
-
-        picp[lv] = float(emp)
-        errors.append(abs(emp - lv))
-        width = np.nanmean((upper - lower)[valid])
-        nmpiw[lv] = float(width / span) if span > 0 else float('nan')
-
-    return {
-        'picp': picp,
-        'coverage_error': float(np.mean(errors)),
-        'nmpiw': nmpiw,
-    }
-
-
-def coverage_metrics(actual, simulated_paths, prefix, levels=(0.50, 0.80, 0.95),
-                     with_reference=True):
-    """
-    interval_coverage 결과를 평탄한 지표 dict로 변환한다.
-    예) prefix='price' -> picp50_price, picp80_price, picp95_price,
-                          coverage_error_price, nmpiw95_price
-
-    with_reference=True면 coverage_reference로 모형 내재 기준분포를 구해
-    각 값이 그 분포의 몇 백분위인지(`*_pct_*`)를 함께 낸다. 단일 경로의 PICP는
-    명목수준과 직접 비교할 수 없으므로(coverage_reference 설명 참조), 판정은
-    반드시 이 백분위로 해야 한다. 5~95 백분위 안이면 모형과 모순되지 않는다.
-    """
-    cov = interval_coverage(actual, simulated_paths, levels=levels)
-    out = {f'coverage_error_{prefix}': cov['coverage_error']}
-    for lv in levels:
-        out[f'picp{int(round(lv * 100))}_{prefix}'] = cov['picp'][lv]
-    out[f'nmpiw95_{prefix}'] = cov['nmpiw'].get(0.95, float('nan'))
-
-    if with_reference:
-        paths = np.asarray(simulated_paths, dtype=float)
-        if paths.ndim == 2 and paths.shape[0] >= 2:
-            ref = coverage_reference(paths, levels=levels)
-            for lv in levels:
-                out[f'picp{int(round(lv * 100))}_pct_{prefix}'] = coverage_percentile(
-                    cov['picp'][lv], ref['picp'][lv])
-            out[f'coverage_error_pct_{prefix}'] = coverage_percentile(
-                cov['coverage_error'], ref['coverage_error'])
-        else:
-            for lv in levels:
-                out[f'picp{int(round(lv * 100))}_pct_{prefix}'] = float('nan')
-            out[f'coverage_error_pct_{prefix}'] = float('nan')
-    return out
-
-
-def coverage_reference(simulated_paths, levels=(0.50, 0.80, 0.95), n_ref=200, seed=42):
-    """
-    커버리지의 모형 내재 기준분포 (사후예측검정)
-
-    경로 하나에서 잰 PICP를 명목수준과 직접 비교하면 안 된다. 가격 경로는
-    자기상관이 강해 유효표본이 T가 아니라 사실상 몇 개뿐이고, 그래서 단일
-    경로의 PICP는 분산이 매우 크고 오른쪽으로 크게 치우친다. 실제로 모형이
-    옳을 때조차 명목 50% 구간의 PICP 중앙값은 0.5가 아니라 0.55 근처다.
-
-    이 함수는 '모형이 옳다'는 전제에서 단일 경로의 커버리지가 어떤 분포를
-    갖는지 구한다. 시뮬레이션 경로 하나를 관측치인 척 놓고 나머지가 만든
-    밴드에 대해 커버리지를 재는 일을 n_ref번 반복한다.
-
-    관측값이 이 분포의 5~95 백분위 안에 있으면 모형과 모순되지 않는다.
+    플러그인 방식(모수를 추정값에 고정)이므로 추정 불확실성이 귀무분포에 반영되지
+    않는다. 이는 검정을 보수적으로 — 기각을 덜 하게 — 만드는 알려진 성질이다.
+    따라서 "통과"만 보지 말고 반환된 분포의 폭(percentile 5/50/95)을 함께 봐야 한다.
+    분포가 지나치게 넓으면 그 검정은 사실상 검정력이 없다는 뜻이다.
 
     Args:
         simulated_paths: 몬테카를로 경로 (N x T)
-        levels: 명목 신뢰수준
-        n_ref: 기준분포를 만들 표본 경로 수
-        seed: 표본 추출 시드
+        statistic_fn: (held_out_paths (M x T)) -> (M,) 통계량 배열.
+                      경로별 통계량을 한 번에 계산하는 벡터화 함수여야 한다.
+                      모형 쪽 요약량(밴드, VaR_t, ES_t 등)은 호출부에서 전체 경로로
+                      한 번만 계산해 클로저로 넘긴다 — 매 반복 재계산하면
+                      O(n_ref * N log N)이 되어 비용이 폭증한다.
+        n_ref: 기준분포 표본 수
+        seed: 표본 추출 시드 (재현성)
 
     Returns:
-        dict: {'picp': {level: (n_ref,) 배열}, 'coverage_error': 배열, 'nmpiw': {level: 배열}}
+        np.ndarray: 유한한 통계량 값들 (길이 <= n_ref)
     """
     paths = np.asarray(simulated_paths, dtype=float)
     if paths.ndim != 2 or paths.shape[0] < 2:
-        raise ValueError("경로가 2개 이상인 (N x T) 배열이어야 한다")
+        return np.array([])
 
     N = paths.shape[0]
-    # 밴드는 전체 경로로 한 번만 계산한다. leave-one-out 효과는 N이 크면 1/N 수준이라
-    # 무시할 수 있고, 매 반복 분위수를 다시 구하는 비용(O(n_ref * N log N))을 없앤다.
-    bands = {}
-    for lv in levels:
-        a = 1.0 - lv
-        bands[lv] = (np.nanquantile(paths, a / 2.0, axis=0),
-                     np.nanquantile(paths, 1.0 - a / 2.0, axis=0))
-
     rng = np.random.default_rng(seed)
     idx = rng.choice(N, size=min(n_ref, N), replace=False)
-    ref = paths[idx]
 
-    picp = {}
-    for lv in levels:
-        lo, hi = bands[lv]
-        picp[lv] = ((ref >= lo) & (ref <= hi)).mean(axis=1)
-
-    errors = np.mean([np.abs(picp[lv] - lv) for lv in levels], axis=0)
-
-    nmpiw = {}
-    span = np.nanmax(ref, axis=1) - np.nanmin(ref, axis=1)
-    for lv in levels:
-        lo, hi = bands[lv]
-        width = np.nanmean(hi - lo)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            nmpiw[lv] = np.where(span > 0, width / span, np.nan)
-
-    return {'picp': picp, 'coverage_error': errors, 'nmpiw': nmpiw}
+    try:
+        vals = np.asarray(statistic_fn(paths[idx]), dtype=float).ravel()
+    except Exception:
+        return np.array([])
+    return vals[np.isfinite(vals)]
 
 
-def coverage_percentile(observed, reference):
-    """관측 커버리지가 기준분포(coverage_reference)의 몇 백분위인지 (0~100)"""
+def reference_percentile(observed, reference):
+    """관측 통계량이 기준분포의 몇 백분위인지 (0~100). 비교 불가면 nan."""
     ref = np.asarray(reference, dtype=float)
     ref = ref[np.isfinite(ref)]
-    if ref.size == 0 or not np.isfinite(observed):
-        return float('nan')
+    if ref.size == 0 or observed is None or not np.isfinite(observed):
+        return float("nan")
     return float(100.0 * np.mean(ref < observed))
+
+
+def two_sided_pvalue(observed, reference):
+    """
+    기준분포 기반 양측 경험적 p-value.
+
+    p = 2 * min(P(ref <= obs), P(ref >= obs)), 1로 절단.
+    <= 와 >= 를 함께 쓰므로 동점(tie)이 있어도 p가 0으로 붕괴하지 않는다.
+    tail_error 처럼 부호를 갖는 통계량은 반드시 양측으로 판정해야 한다.
+    """
+    ref = np.asarray(reference, dtype=float)
+    ref = ref[np.isfinite(ref)]
+    if ref.size == 0 or observed is None or not np.isfinite(observed):
+        return float("nan")
+    p_lo = float(np.mean(ref <= observed))
+    p_hi = float(np.mean(ref >= observed))
+    return float(min(1.0, 2.0 * min(p_lo, p_hi)))
 
 
 def realized_volatility(returns, window=20):
@@ -190,50 +99,6 @@ def realized_volatility(returns, window=20):
     returns_series = pd.Series(returns)
     rv = returns_series.rolling(window=window).std() * np.sqrt(252)  # 연간화
     return rv.bfill().fillna(rv.iloc[window-1] if len(rv) > window-1 else rv.iloc[-1] if len(rv) > 0 else 0).values
-
-
-def calculate_all_metrics(actual_nav, simulated_nav, actual_returns, simulated_returns,
-                          monte_carlo_nav_paths=None, monte_carlo_returns_paths=None):
-    """
-    보조 검증 지표 계산 — 예측구간 커버리지
-
-    본 검증(PIT-KS, VaR-Kupiec, ES)은 calculate_statistical_tests()가 담당한다.
-    이 함수는 그 세 검정이 다루지 않는 축인 '구간 커버리지'만 보조로 산출한다.
-
-    Args:
-        actual_nav: 실제 가격/수준 시계열
-        simulated_nav: 대표 경로 (커버리지 계산에는 쓰이지 않으며 서명 호환용)
-        actual_returns: 실제 수익률
-        simulated_returns: 대표 경로 수익률 (동일)
-        monte_carlo_nav_paths: MC 가격 경로 (N x T) — 커버리지 산출에 필수
-        monte_carlo_returns_paths: MC 수익률 경로 (N x T)
-
-    Returns:
-        dict: picp50/80/95_price, coverage_error_price, nmpiw95_price 및 동일한 _vol 계열
-    """
-    metrics = {}
-
-    # 가격 예측구간 커버리지
-    print("  [예측구간 커버리지] 계산 중...")
-    if monte_carlo_nav_paths is not None and len(monte_carlo_nav_paths) > 0:
-        if isinstance(monte_carlo_nav_paths, list):
-            monte_carlo_nav_paths = np.array(monte_carlo_nav_paths)
-        metrics.update(coverage_metrics(actual_nav, monte_carlo_nav_paths, 'price'))
-    else:
-        # 대표 경로 하나로는 구간을 만들 수 없다
-        metrics.update(coverage_metrics(actual_nav, np.empty((0, len(actual_nav))), 'price'))
-
-    # 변동성 예측구간 커버리지
-    actual_rv = realized_volatility(actual_returns)
-    if monte_carlo_returns_paths is not None and len(monte_carlo_returns_paths) > 0:
-        if isinstance(monte_carlo_returns_paths, list):
-            monte_carlo_returns_paths = np.array(monte_carlo_returns_paths)
-        sim_vol_paths = np.array([realized_volatility(ret) for ret in monte_carlo_returns_paths])
-        metrics.update(coverage_metrics(actual_rv, sim_vol_paths, 'vol'))
-    else:
-        metrics.update(coverage_metrics(actual_rv, np.empty((0, len(actual_rv))), 'vol'))
-
-    return metrics
 
 
 def pit_ks_test(actual_returns, simulated_returns_paths):
@@ -399,74 +264,140 @@ def var_kupiec_test(actual_returns, simulated_returns_paths, alpha=0.05):
     }
 
 
-def es_test(actual_returns, simulated_returns_paths, alpha=0.05):
+def _es_var_curves(simulated_returns_paths, alpha):
+    """시점별 VaR_t 와 ES_t 를 전체 경로에서 한 번만 계산한다.
+
+    기준분포를 만들 때 경로마다 이걸 다시 구하면 O(n_ref * N log N)이 된다.
+    leave-one-out 효과는 1/N 수준이라 무시할 수 있으므로 전체 경로로 한 번만 구해
+    재사용한다 (reference_distribution 의 설계 전제와 같다).
     """
-    ES (Expected Shortfall) 검정
-    각 시점 t에서 ES_t = mean_i(r_hat^{(i)}_t | r_hat^{(i)}_t <= VaR_t)를 계산하고,
-    위반일 E={t: r_t < VaR_t}에서 tail_error = mean(r_t|E) - mean(ES_t|E) 계산
-    
+    paths = np.asarray(simulated_returns_paths, dtype=float)
+    if paths.ndim == 1:
+        paths = paths.reshape(1, -1)
+    T = paths.shape[1]
+
+    var_t = np.nanquantile(paths, alpha, axis=0)
+
+    es_t = np.empty(T)
+    for t in range(T):
+        col = paths[:, t]
+        col = col[np.isfinite(col)]
+        if col.size == 0:
+            es_t[t] = np.nan
+            continue
+        tail = col[col <= var_t[t]]
+        # VaR 이하 표본이 0개면 최소 1개(최솟값) 강제 포함 — 기존 규약 유지
+        es_t[t] = np.mean(tail) if tail.size else np.min(col)
+    return var_t, es_t
+
+
+def _tail_error_from(series, var_t, es_t):
+    """단일 계열의 tail_error. 위반일이 없으면 nan."""
+    r = np.asarray(series, dtype=float).ravel()
+    n = min(len(r), len(var_t))
+    r, v, e = r[:n], var_t[:n], es_t[:n]
+    mask = np.isfinite(r) & np.isfinite(v) & np.isfinite(e) & (r < v)
+    if not mask.any():
+        return float("nan")
+    return float(np.mean(r[mask]) - np.mean(e[mask]))
+
+
+def _tail_error_batch(paths, var_t, es_t):
+    """여러 경로의 tail_error 를 한 번에. (M x T) -> (M,)"""
+    P = np.asarray(paths, dtype=float)
+    n = min(P.shape[1], len(var_t))
+    P, v, e = P[:, :n], var_t[:n], es_t[:n]
+    mask = np.isfinite(P) & (P < v) & np.isfinite(v) & np.isfinite(e)
+    cnt = mask.sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean_r = np.where(cnt > 0, np.nansum(np.where(mask, P, 0.0), axis=1) / cnt, np.nan)
+        mean_e = np.where(cnt > 0,
+                          np.nansum(np.where(mask, np.broadcast_to(e, P.shape), 0.0), axis=1) / cnt,
+                          np.nan)
+    return mean_r - mean_e
+
+
+def es_test(actual_returns, simulated_returns_paths, alpha=0.05,
+            n_ref=2000, seed=42):
+    """
+    ES (Expected Shortfall) 검정 — 모수적 부트스트랩
+
+    각 시점 t 에서
+        VaR_t = quantile_i(r_hat^{(i)}_t, alpha)
+        ES_t  = mean_i(r_hat^{(i)}_t | r_hat^{(i)}_t <= VaR_t)
+    위반일 E = {t : r_t < VaR_t} 에 대해
+        tail_error = mean(r_t | E) - mean(ES_t | E)
+
+    부호 규약: 손실이 음수인 수익률 공간이므로
+        tail_error > 0  실현 손실이 모형 예측보다 덜 심함 (꼬리 과대평가)
+        tail_error < 0  실현 손실이 모형 예측보다 더 심함 (꼬리 과소평가)
+
+    tail_error 자체는 귀무분포가 없어 그대로는 판정에 쓸 수 없다. 그래서 시뮬레이션
+    경로 하나를 관측치인 척 놓고 같은 방식으로 tail_error 를 계산하는 일을 n_ref번
+    반복해 모형 내재 기준분포를 만들고, 실제 계열의 값이 그 분포의 어디에 있는지로
+    양측 검정한다. 부호를 갖는 통계량이므로 반드시 양측이다.
+
+    참고 — Gneiting (2011)의 elicitability 결과 때문에 "ES는 백테스트할 수 없다"는
+    오해가 있었으나 이는 모형 '선택'의 문제이지 '검정'의 문제가 아니다.
+    Acerbi & Szekely (2014), Fissler, Ziegel & Gneiting (2016) 참조.
+    Acerbi-Szekely 의 검정을 직접 구현하는 것도 대안으로 검토 가능하나, 여기서는
+    이미 검증된 기준분포 경로를 재사용해 구현 위험을 줄였다.
+
     Args:
         actual_returns: 실제 수익률 시계열 (T,)
-        simulated_returns_paths: 시뮬레이션 수익률 경로들 (N x T 배열)
-        alpha: VaR 유의수준 (기본값: 0.05)
-    
+        simulated_returns_paths: 시뮬레이션 수익률 경로 (N x T)
+        alpha: VaR 유의수준 (Kupiec 검정과 동일 값을 쓴다)
+        n_ref: 기준분포 표본 수
+        seed: 재현성 시드
+
     Returns:
-        dict: {'tail_error': tail_error, 'mean_actual_es': 실제 ES 평균, 'mean_sim_es': 시뮬레이션 ES 평균}
+        dict: tail_error, pvalue, percentile, ref_p5/p50/p95, n_violations 등
     """
-    actual_returns = np.array(actual_returns)
-    simulated_returns_paths = np.array(simulated_returns_paths)
-    
-    if simulated_returns_paths.ndim == 1:
-        simulated_returns_paths = simulated_returns_paths.reshape(1, -1)
-    
-    T = len(actual_returns)
-    
-    # 각 시점 t에서 VaR_t와 ES_t 계산
-    var_t = np.zeros(T)
-    es_t = np.zeros(T)
-    I_t = np.zeros(T, dtype=bool)
-    
-    for t in range(T):
-        # 시점 t에서의 시뮬레이션 값들
-        sim_values_t = simulated_returns_paths[:, t]
-        # VaR_t = quantile_i(r_hat^{(i)}_t, alpha)
-        var_t[t] = np.quantile(sim_values_t, alpha)
-        # ES_t = mean_i(r_hat^{(i)}_t | r_hat^{(i)}_t <= VaR_t)
-        tail_samples = sim_values_t[sim_values_t <= var_t[t]]
-        
-        # 예외처리: VaR 이하 표본이 0개면 최소 1개 강제 포함
-        if len(tail_samples) == 0:
-            # 가장 작은 값 1개 포함
-            tail_samples = np.array([np.min(sim_values_t)])
-        
-        es_t[t] = np.mean(tail_samples)
-        # I_t = 1{r_t < VaR_t}
-        I_t[t] = actual_returns[t] < var_t[t]
-    
-    # 위반일 E = {t: r_t < VaR_t}
-    E = np.where(I_t)[0]
-    
-    if len(E) == 0:
-        # 위반일이 없으면 ES는 정의되지 않음 (0.0으로 두면 오해 소지)
-        return {
-            'tail_error': None,
-            'mean_actual_es': None,
-            'mean_sim_es': None,
-            'n_violations': 0
-        }
-    
-    # 위반일에서의 실제 수익률 평균
-    mean_actual_es = np.mean(actual_returns[E])
-    # 위반일에서의 시뮬레이션 ES 평균
-    mean_sim_es = np.mean(es_t[E])
-    # tail_error = mean(r_t|E) - mean(ES_t|E)
+    actual = np.asarray(actual_returns, dtype=float).ravel()
+    paths = np.asarray(simulated_returns_paths, dtype=float)
+    if paths.ndim == 1:
+        paths = paths.reshape(1, -1)
+
+    var_t, es_t = _es_var_curves(paths, alpha)
+
+    n = min(len(actual), len(var_t))
+    viol = np.isfinite(actual[:n]) & (actual[:n] < var_t[:n])
+    n_viol = int(viol.sum())
+
+    empty = {
+        "tail_error": None, "mean_actual_es": None, "mean_sim_es": None,
+        "n_violations": n_viol, "pvalue": float("nan"), "percentile": float("nan"),
+        "ref_p5": float("nan"), "ref_p50": float("nan"), "ref_p95": float("nan"),
+        "n_ref_effective": 0, "is_valid": False,
+    }
+    if n_viol == 0:
+        # 위반일이 없으면 ES 는 정의되지 않는다 (0.0으로 두면 오해 소지)
+        return empty
+
+    mean_actual_es = float(np.mean(actual[:n][viol]))
+    mean_sim_es = float(np.mean(es_t[:n][viol]))
     tail_error = mean_actual_es - mean_sim_es
-    
+
+    ref = reference_distribution(
+        paths, lambda held: _tail_error_batch(held, var_t, es_t),
+        n_ref=n_ref, seed=seed,
+    )
+    pval = two_sided_pvalue(tail_error, ref)
+    pct = reference_percentile(tail_error, ref)
+
     return {
-        'tail_error': float(tail_error),
-        'mean_actual_es': float(mean_actual_es),
-        'mean_sim_es': float(mean_sim_es),
-        'n_violations': int(len(E))
+        "tail_error": float(tail_error),
+        "mean_actual_es": mean_actual_es,
+        "mean_sim_es": mean_sim_es,
+        "n_violations": n_viol,
+        "pvalue": pval,
+        "percentile": pct,
+        "ref_p5": float(np.percentile(ref, 5)) if ref.size else float("nan"),
+        "ref_p50": float(np.percentile(ref, 50)) if ref.size else float("nan"),
+        "ref_p95": float(np.percentile(ref, 95)) if ref.size else float("nan"),
+        "n_ref_effective": int(ref.size),
+        # 기준분포를 못 만들면(ref 비어 있음) 판정 불가 -> 통과로 처리하지 않는다
+        "is_valid": bool(np.isfinite(pval) and pval >= 0.05),
     }
 
 
@@ -495,8 +426,14 @@ def calculate_statistical_tests(actual_returns, simulated_returns_paths, alpha=0
     # 3. ES 검정
     es_result = es_test(actual_returns, simulated_returns_paths, alpha=alpha)
     
-    # 전체 유효성 판단 (PIT-KS, Kupiec p-value > 0.05)
-    is_valid = (pit_ks_result['ks_pvalue'] > 0.05 and kupiec_result['pvalue'] > 0.05)
+    # 전체 유효성 판단 — 프레임워크가 규정한 세 검정 모두를 쓴다.
+    # ES 는 이전에 p-value 가 없어 판정에서 빠져 있었으나, 모수적 부트스트랩으로
+    # 귀무분포를 얻으면서 다른 두 검정과 동등하게 판정에 들어간다.
+    is_valid = bool(
+        pit_ks_result['ks_pvalue'] >= 0.05
+        and kupiec_result['pvalue'] >= 0.05
+        and es_result.get('is_valid', False)
+    )
     
     return {
         'pit_ks': pit_ks_result,

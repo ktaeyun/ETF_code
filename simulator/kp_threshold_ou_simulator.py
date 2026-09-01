@@ -4,20 +4,31 @@ KP Threshold-OU 시뮬레이터
 
 모델 (레짐 r):
   σ_t = σ_0^r·exp(δ1^r·vol + δ2^r·kospi + δ3^r·bitcoin_kr)
-  kp[t+1] = kp[t] + κ^r·(μ^r - kp[t]) + σ_t·ε_t
+  kp[t+1] = kp[t] + κ^r·(μ^r - kp[t]) + σ_t·ε_t,   E[ε]=0, Var(ε)=1
 
 레짐:
   r=0: |KP_t| ≤ τ
   r=1:  KP_t > τ
   r=2:  KP_t < -τ
+
+혁신항 ε는 정규 또는 표준화 Student-t를 쓴다(GAP OU와 같은 사양). 정규 혁신항에서는
+ES 검정이 기각됐다 — 실제 하방 꼬리 평균손실 −0.0276 대 모형 −0.0247로 모형 꼬리가
+얇았다(기준분포 1.3 백분위, p=0.026). t 혁신항은 σ를 건드리지 않고 꼬리 두께만 넓힌다.
+
+자유도 ν는 레짐별로 두지 않고 하나만 추정한다. 레짐1(KP > τ)의 표본이 전체의
+10~30%뿐이라 레짐별 ν는 추정이 불안정하다. 꼬리 두께는 레짐 공통 성질로 보고,
+레짐 차이는 κ·μ·σ_0가 흡수한다.
 """
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
-from scipy.stats import norm
+from scipy.optimize import minimize, minimize_scalar
+from scipy.stats import norm, t as student_t
 from typing import Optional, Tuple, Dict
 from sklearn.metrics import mean_squared_error
+
+# 표준화 t 유틸은 GAP OU와 공유한다 (같은 정의를 두 곳에 두지 않기 위해)
+from simulator.gap_ou_simulator import NU_MIN, NU_MAX, _t_scale, standardized_t
 
 
 def zscore_clip(x: np.ndarray, clip: float = 3.0) -> np.ndarray:
@@ -67,8 +78,10 @@ def regime_masks_for(kp: np.ndarray, threshold: float, n_regimes: int) -> Dict[i
 def fit_ou_regime(
     kp_series: np.ndarray,
     regime_mask: np.ndarray,
-    regime_id: int
+    regime_id: int,
+    nu: Optional[float] = None
 ) -> Dict:
+    """레짐 하나의 (κ, μ, σ0) 최대우도 추정. nu가 주어지면 표준화 t, None이면 정규."""
     kp_regime = kp_series[regime_mask]
     if len(kp_regime) < 5:
         return {'kappa': 0.1, 'mu': np.mean(kp_series), 'sigma0': np.std(kp_series)}
@@ -101,14 +114,15 @@ def fit_ou_regime(
         k, m, s = params
         if k <= 0 or s <= 0:
             return 1e10
-        try:
-            loglik = 0.0
-            for i in range(len(delta_kp)):
-                mean_t = k * (m - kp_lag[i])
-                loglik += norm.logpdf(delta_kp[i], loc=mean_t, scale=s)
-            return -loglik
-        except:
+        mean_t = k * (m - kp_lag)
+        if nu is None:
+            ll = norm.logpdf(delta_kp, loc=mean_t, scale=s)
+        else:
+            # ε = T_ν / sqrt(ν/(ν-2)) 이므로 delta_kp의 t-스케일은 s/_t_scale(ν)
+            ll = student_t.logpdf(delta_kp, df=nu, loc=mean_t, scale=s / _t_scale(nu))
+        if not np.all(np.isfinite(ll)):
             return 1e10
+        return -float(np.sum(ll))
 
     try:
         result = minimize(
@@ -133,8 +147,17 @@ def fit_threshold_ou(
     threshold: float,
     clip: float = 3.0,
     regularization: float = 0.01,
-    n_regimes: int = DEFAULT_N_REGIMES
+    n_regimes: int = DEFAULT_N_REGIMES,
+    dist: str = "t"
 ) -> Dict:
+    """
+    Args:
+        dist: "t"이면 레짐 공통 자유도 ν를 함께 추정, "normal"이면 정규 혁신항.
+
+    Returns:
+        dict: threshold, n_regimes, regime_params, delta{1,2,3}_regime, 표준화 상수,
+              nu (정규면 None)
+    """
     kp = np.asarray(kp_series).flatten()
     vol_btc = np.asarray(volume_btc).flatten()
     kospi = np.asarray(kospi_vol).flatten()
@@ -152,58 +175,104 @@ def fit_threshold_ou(
     regimes = list(range(n_regimes))
     regime_masks = regime_masks_for(kp, threshold, n_regimes)
 
-    params_regime = {}
-    for r in regimes:
-        params_regime[r] = fit_ou_regime(kp, regime_masks[r], r)
-
     delta_kp = np.diff(kp)
     kp_lag = kp[:-1]
     vol_btc_lag = vol_btc_z[:-1]
     kospi_lag = kospi_z[:-1]
     bitcoin_kr_lag = bitcoin_kr_z[:-1]
 
-    delta1_regime = {}
-    delta2_regime = {}
-    delta3_regime = {}
+    # 시점별 레짐(직전 KP 기준). σ_t·ν 계산에서 반복해 쓴다.
+    regime_idx = np.array([get_regime(v, threshold, n_regimes) for v in kp_lag])
 
-    for r in regimes:
-        regime_mask_lag = np.array([get_regime(kp_lag[i], threshold, n_regimes) == r
-                                    for i in range(len(kp_lag))])
+    def _fit_regimes(nu):
+        return {r: fit_ou_regime(kp, regime_masks[r], r, nu=nu) for r in regimes}
 
-        if np.sum(regime_mask_lag) < 5:
-            delta1_regime[r] = 0.0
-            delta2_regime[r] = 0.0
-            delta3_regime[r] = 0.0
-            continue
+    def _fit_deltas(params_regime):
+        """레짐별 log|잔차| 회귀로 외생변수 계수를 잡는다. κ·μ가 갱신되면 함께 갱신된다."""
+        d1, d2, d3 = {}, {}, {}
+        for r in regimes:
+            regime_mask_lag = (regime_idx == r)
 
-        kappa_r = params_regime[r]['kappa']
-        mu_r = params_regime[r]['mu']
-        predicted = kappa_r * (mu_r - kp_lag[regime_mask_lag])
-        residuals = delta_kp[regime_mask_lag] - predicted
-        residuals_abs = np.abs(residuals)
+            if np.sum(regime_mask_lag) < 5:
+                d1[r] = d2[r] = d3[r] = 0.0
+                continue
 
-        X_exog = np.column_stack([
-            np.ones(np.sum(regime_mask_lag)),
-            vol_btc_lag[regime_mask_lag],
-            kospi_lag[regime_mask_lag],
-            bitcoin_kr_lag[regime_mask_lag],
-        ])
+            kappa_r = params_regime[r]['kappa']
+            mu_r = params_regime[r]['mu']
+            predicted = kappa_r * (mu_r - kp_lag[regime_mask_lag])
+            residuals = delta_kp[regime_mask_lag] - predicted
+            residuals_abs = np.abs(residuals)
+
+            X_exog = np.column_stack([
+                np.ones(np.sum(regime_mask_lag)),
+                vol_btc_lag[regime_mask_lag],
+                kospi_lag[regime_mask_lag],
+                bitcoin_kr_lag[regime_mask_lag],
+            ])
+
+            try:
+                log_resid = np.log(residuals_abs + 1e-8)
+                beta_exog = np.linalg.lstsq(X_exog, log_resid, rcond=None)[0]
+                d1[r] = float(np.clip(beta_exog[1] / 2.0, -2.0, 2.0))
+                d2[r] = float(np.clip(beta_exog[2] / 2.0, -2.0, 2.0))
+                d3[r] = float(np.clip(beta_exog[3] / 2.0, -2.0, 2.0))
+            except Exception:
+                d1[r] = d2[r] = d3[r] = 0.0
+        return d1, d2, d3
+
+    def _fit_nu(params_regime, d1, d2, d3):
+        """
+        레짐을 가로질러 모은 표준화 잔차 z = (Δkp - κ(μ-kp))/σ_t 에서 ν만 1-D로 찾는다.
+        GAP OU와 같은 이유로 모수와 한꺼번에 최적화하지 않는다 — 스케일 차이(κ~0.3 대
+        σ0~0.005 대 ν~8) 때문에 ν 방향 수치미분이 묻힌다.
+        """
+        kappa_v = np.array([params_regime[r]['kappa'] for r in regime_idx])
+        mu_v = np.array([params_regime[r]['mu'] for r in regime_idx])
+        sigma0_v = np.array([params_regime[r]['sigma0'] for r in regime_idx])
+        d1_v = np.array([d1.get(r, 0.0) for r in regime_idx])
+        d2_v = np.array([d2.get(r, 0.0) for r in regime_idx])
+        d3_v = np.array([d3.get(r, 0.0) for r in regime_idx])
+
+        sigma_t = sigma0_v * np.exp(d1_v * vol_btc_lag + d2_v * kospi_lag
+                                    + d3_v * bitcoin_kr_lag)
+        z = (delta_kp - kappa_v * (mu_v - kp_lag)) / sigma_t
+        z = z[np.isfinite(z)]
+        if z.size < 20:
+            return None
+
+        def neg(nu):
+            ll = student_t.logpdf(z, df=nu, scale=1.0 / _t_scale(nu))
+            return 1e10 if not np.all(np.isfinite(ll)) else -float(np.sum(ll))
 
         try:
-            log_resid = np.log(residuals_abs + 1e-8)
-            beta_exog = np.linalg.lstsq(X_exog, log_resid, rcond=None)[0]
-            delta1_regime[r] = float(np.clip(beta_exog[1] / 2.0, -2.0, 2.0))
-            delta2_regime[r] = float(np.clip(beta_exog[2] / 2.0, -2.0, 2.0))
-            delta3_regime[r] = float(np.clip(beta_exog[3] / 2.0, -2.0, 2.0))
-        except:
-            delta1_regime[r] = 0.0
-            delta2_regime[r] = 0.0
-            delta3_regime[r] = 0.0
+            r = minimize_scalar(neg, bounds=(NU_MIN, NU_MAX), method='bounded')
+            return float(r.x) if r.success else None
+        except Exception:
+            return None
+
+    # 1단계: 정규 가정으로 레짐 모수와 외생변수 계수를 잡는다
+    params_regime = _fit_regimes(None)
+    delta1_regime, delta2_regime, delta3_regime = _fit_deltas(params_regime)
+
+    # 2단계: (ν | 모수) 와 (모수 | ν) 를 번갈아 갱신한다
+    nu_hat = None
+    if dist == "t":
+        for _ in range(3):
+            nu_new = _fit_nu(params_regime, delta1_regime, delta2_regime, delta3_regime)
+            if nu_new is None:
+                break
+            params_regime = _fit_regimes(nu_new)
+            delta1_regime, delta2_regime, delta3_regime = _fit_deltas(params_regime)
+            converged = (nu_hat is not None and abs(nu_new - nu_hat) < 1e-3)
+            nu_hat = nu_new
+            if converged:
+                break
 
     return {
         'threshold': threshold,
         'n_regimes': n_regimes,
         'regime_params': params_regime,
+        'nu': (float(nu_hat) if nu_hat is not None else None),
         'delta1_regime': delta1_regime,
         'delta2_regime': delta2_regime,
         'delta3_regime': delta3_regime,
@@ -223,8 +292,11 @@ def select_optimal_threshold(
     bitcoin_kr: pd.Series,
     threshold_candidates: np.ndarray = None,
     clip: float = 3.0,
-    n_regimes: int = DEFAULT_N_REGIMES
+    n_regimes: int = DEFAULT_N_REGIMES,
+    dist: str = "t"
 ) -> Tuple[float, Dict]:
+    """τ 선택은 정규 SSR 기반 BIC로 한다 (혁신항 분포와 무관한 기준).
+    선택된 τ의 적합 결과에는 dist에 따른 ν가 함께 담긴다."""
     kp = np.asarray(kp_series).flatten()
 
     if threshold_candidates is None:
@@ -243,7 +315,7 @@ def select_optimal_threshold(
     for tau in threshold_candidates:
         try:
             result = fit_threshold_ou(kp_series, volume_btc, kospi_vol, bitcoin_kr, tau,
-                                      clip=clip, n_regimes=n_regimes)
+                                      clip=clip, n_regimes=n_regimes, dist=dist)
 
             kp_arr = np.asarray(kp_series)
             # 레짐당 OU 모수 3개(kappa, mu, sigma0) + 외생변수 계수 3개(delta1~3)
@@ -278,19 +350,25 @@ def select_optimal_threshold(
     if best_threshold is None:
         abs_kp = np.abs(kp)
         best_threshold = np.percentile(abs_kp, 80)
-        best_result = fit_threshold_ou(kp_series, volume_btc, kospi_vol, bitcoin_kr, best_threshold, clip=clip)
+        best_result = fit_threshold_ou(kp_series, volume_btc, kospi_vol, bitcoin_kr, best_threshold,
+                                       clip=clip, n_regimes=n_regimes, dist=dist)
 
     return best_threshold, best_result
 
 
 class KPThresholdOUSimulator:
-    """KP Threshold-OU 시뮬레이터 (σ_t = σ_0·exp(δ1·vol + δ2·kospi + δ3·bitcoin_kr))"""
+    """KP Threshold-OU 시뮬레이터 (σ_t = σ_0·exp(δ1·vol + δ2·kospi + δ3·bitcoin_kr))
+
+    nu가 주어지면 혁신항으로 표준화 Student-t를, None이면 정규를 쓴다.
+    표준화되어 있으므로 어느 쪽이든 Var(ε)=1이고 σ_t의 의미는 같다.
+    """
 
     def __init__(self, fit_result: Dict, clip: float = 3.0):
         self.threshold = fit_result['threshold']
         self.regime_params = fit_result['regime_params']
         # 레짐 수는 적합 결과에서 읽는다 (저장된 모수를 다시 로드할 때도 일관)
         self.n_regimes = fit_result.get('n_regimes', len(self.regime_params))
+        self.nu = fit_result.get('nu')
         self.delta1_regime = fit_result['delta1_regime']
         self.delta2_regime = fit_result['delta2_regime']
         self.delta3_regime = fit_result['delta3_regime']
@@ -367,7 +445,8 @@ class KPThresholdOUSimulator:
                 delta1_r * vol_btc_lag + delta2_r * kospi_lag + delta3_r * bitcoin_kr_lag
             )
 
-            epsilon_t = np.random.standard_normal()
+            epsilon_t = (standardized_t(self.nu) if self.nu is not None
+                         else np.random.standard_normal())
             kp[t + 1] = kp[t] + kappa_r * (mu_r - kp[t]) + sigma_t * epsilon_t
 
         return pd.Series(kp)
@@ -381,16 +460,18 @@ def fit_kp_threshold_ou(
     threshold: float = None,
     clip: float = 3.0,
     regularization: float = 0.01,
-    n_regimes: int = DEFAULT_N_REGIMES
+    n_regimes: int = DEFAULT_N_REGIMES,
+    dist: str = "t"
 ) -> KPThresholdOUSimulator:
     if threshold is None:
         threshold, fit_result = select_optimal_threshold(
-            kp_series, volume_btc, kospi_vol, bitcoin_kr, clip=clip, n_regimes=n_regimes
+            kp_series, volume_btc, kospi_vol, bitcoin_kr, clip=clip, n_regimes=n_regimes,
+            dist=dist
         )
     else:
         fit_result = fit_threshold_ou(
             kp_series, volume_btc, kospi_vol, bitcoin_kr, threshold,
-            clip=clip, regularization=regularization, n_regimes=n_regimes
+            clip=clip, regularization=regularization, n_regimes=n_regimes, dist=dist
         )
 
     return KPThresholdOUSimulator(fit_result, clip=clip)
