@@ -28,7 +28,8 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from simulator.data_loader import load_gap_exog, load_kp_exog, load_nav_exog_and_returns
+from simulator.data_loader import (load_gap_exog, load_kp_exog, load_nav_exog_and_returns,
+                                   align_to_nav_grid)
 
 
 def _fmt_p(p):
@@ -152,11 +153,14 @@ def threshold_effect(x, n_perm=500, block=20, seed=42):
 
 
 def main():
-    nav_ret = load_nav_exog_and_returns()["Log Return"].to_numpy(dtype=float)
+    # NAV 그리드(결정 11: BTC 현물 + 1거래일 시차보정)에 GAP/KP를 맞춘다.
+    _nav_df = load_nav_exog_and_returns()
+    _gap_df, _kp_df = align_to_nav_grid(_nav_df, load_gap_exog(), load_kp_exog())
+    nav_ret = _nav_df["Log Return"].to_numpy(dtype=float)
     nav_ret = nav_ret[np.isfinite(nav_ret)]
-    gap = load_gap_exog()["etf_premium"].to_numpy(dtype=float)
+    gap = _gap_df["etf_premium"].to_numpy(dtype=float)
     gap = gap[np.isfinite(gap)]
-    kp = load_kp_exog()["Kimchi Premium"].to_numpy(dtype=float)
+    kp = _kp_df["Kimchi Premium"].to_numpy(dtype=float)
     kp = kp[np.isfinite(kp)]
 
     print("=" * 78)

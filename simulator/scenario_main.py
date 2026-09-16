@@ -52,7 +52,8 @@ from preprocessing.scenario_generator import (
     save_hmm_results_cache,
     scenarios_from_csv,
 )
-from simulator.data_loader import load_gap_exog, load_kp_exog
+from simulator.data_loader import (load_gap_exog, load_kp_exog,
+                                   load_nav_exog_and_returns, align_to_nav_grid)
 from simulator.gap_ou_simulator import GapOUSimulator
 from simulator.kp_threshold_ou_simulator import KPThresholdOUSimulator
 from simulator.visualizer import create_all_visualizations
@@ -76,6 +77,19 @@ _KP_EXOG_MAP = {
 # ══════════════════════════════════════════════════════════════
 # 유틸리티
 # ══════════════════════════════════════════════════════════════
+
+
+def _base_nav_source(meta_path) -> str:
+    """Phase 1이 어떤 NAV 계열로 돌았는지 sim_meta.json에서 읽는다.
+
+    nav_true 기반이면 NAV가 로그차분으로 첫 거래일을 잃으므로(343 -> 342),
+    GAP/KP도 같은 날을 버려야 결합 시 날짜 정렬이 유지된다.
+    """
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            return json.load(f).get("nav_source", "btc")
+    except (OSError, ValueError):
+        return "btc"
 
 def _to_serializable(obj):
     if obj is None:
@@ -137,8 +151,12 @@ def run_single_scenario(
             (out_dir / "plots" / sub).mkdir(parents=True, exist_ok=True)
 
     # ── 1. 실제 GAP / KP 시계열 로드 ──────────────────────────
-    df_gap_hist = load_gap_exog(base_dir=base_dir)
-    df_kp_hist  = load_kp_exog(base_dir=base_dir)
+    _nav_hist = load_nav_exog_and_returns(
+        base_dir=base_dir,
+        nav_source=_base_nav_source(_ROOT / "results" / "simulator" / "cache" / "sim_meta.json"),
+    )
+    df_gap_hist, df_kp_hist = align_to_nav_grid(
+        _nav_hist, load_gap_exog(base_dir=base_dir), load_kp_exog(base_dir=base_dir))
 
     gap_series    = df_gap_hist["etf_premium"]
     kp_series     = df_kp_hist["Kimchi Premium"]

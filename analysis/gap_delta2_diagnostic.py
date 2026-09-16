@@ -36,7 +36,7 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from simulator.data_loader import load_gap_exog
+from simulator.data_loader import load_gap_exog, load_nav_exog_and_returns, align_to_nav_grid
 from simulator.gap_ou_simulator import (
     NU_MAX,
     NU_MIN,
@@ -169,7 +169,8 @@ def parametric_bootstrap(p, d, B=500, seed=42):
 # ──────────────────────────────────────────────────────────────
 def main():
     warnings.filterwarnings("ignore")
-    df = load_gap_exog()
+    # 본 파이프라인과 같은 NAV 그리드를 쓴다 (결정 11).
+    df = align_to_nav_grid(load_nav_exog_and_returns(), load_gap_exog())
     gap, si, vix = df["etf_premium"], df["value"], df["btc_volatility"]
     d = build_design(gap, si, vix)
     T = len(d["delta_g"])

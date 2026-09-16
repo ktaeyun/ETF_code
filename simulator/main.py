@@ -21,7 +21,8 @@ if str(_root) not in sys.path:
 import argparse
 import pandas as pd
 
-from simulator.data_loader import load_nav_exog_and_returns, load_gap_exog, load_kp_exog
+from simulator.data_loader import (load_nav_exog_and_returns, load_gap_exog, load_kp_exog,
+                                   align_to_nav_grid, NAV_SOURCE_DEFAULT, NAV_SOURCES)
 from simulator.arima_garch_t_nav_simulator import (
     fit_arimax_garch_t,
     log_returns_to_nav,
@@ -65,7 +66,7 @@ def _file_md5(path: Path) -> str:
 
 def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int, seed: int,
                    gap_dist: str = "t", kp_n_regimes: int = 2,
-                   kp_dist: str = "t") -> str:
+                   kp_dist: str = "t", nav_source: str = NAV_SOURCE_DEFAULT) -> str:
     data_files = [
         Path(base_dir) / "dataset" / "train" / "nav_train.csv",
         Path(base_dir) / "dataset" / "train" / "gap_train_main.csv",
@@ -83,6 +84,7 @@ def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int
         "gap_dist": gap_dist,
         "kp_n_regimes": kp_n_regimes,
         "kp_dist": kp_dist,
+        "nav_source": nav_source,
     }, sort_keys=True).encode())
     return h.hexdigest()
 
@@ -135,7 +137,12 @@ def main():
     parser = argparse.ArgumentParser(description="NAV ARIMAX-GARCH-t 시뮬레이터 (검증·시각화 포함)")
     parser.add_argument("--base-dir", type=str, default=None, help="프로젝트 루트")
     parser.add_argument("--ar-order", type=int, nargs=3, default=[1, 0, 1], metavar=("p", "d", "q"), help="ARIMA 차수")
-    parser.add_argument("--S0", type=float, default=100.0, help="초기 NAV (실제·시뮬 공통)")
+    parser.add_argument("--S0", type=float, default=None,
+                        help="초기 NAV (실제·시뮬 공통). 기본: nav_true의 첫 거래일 값 "
+                             "(--nav-source btc 이면 100.0)")
+    parser.add_argument("--nav-source", choices=list(NAV_SOURCES), default=NAV_SOURCE_DEFAULT,
+                        help="NAV 계열 정의 (기본 btc_aligned: BTC 현물 + 1거래일 시차보정. "
+                             "운용보수 등 펀드 비용이 섞이지 않은 순수 기초자산 가치)")
     parser.add_argument("--n-simulations", type=int, default=1000, help="몬테카를로 시뮬레이션 횟수")
     parser.add_argument("--seed", type=int, default=42, help="랜덤 시드")
     parser.add_argument("--out-dir", type=str, default=None, help="결과 저장 디렉터리 (기본: results/simulator)")
@@ -160,21 +167,32 @@ def main():
         (out_dir / "plots" / "combined").mkdir(parents=True, exist_ok=True)
 
     ar_order = tuple(args.ar_order)
-    S0 = args.S0
+    nav_source = args.nav_source
     cache_dir = out_dir / "cache"
 
     # 1) 데이터 로드
     print("\n[1단계] 데이터 로드")
-    df = load_nav_exog_and_returns(base_dir=base_dir)
+    df = load_nav_exog_and_returns(base_dir=base_dir, nav_source=nav_source)
     log_returns = df["Log Return"]
     exog = None
     T = len(log_returns)
     actual_returns = np.asarray(log_returns).flatten()
+
+    # S0(초기 NAV) — 그리드 첫 거래일의 실제 nav_true를 앵커로 쓴다.
+    # etf_true = nav_true x (1+GAP)이므로, 이 앵커에서 출발한 결합 경로
+    # NAV x (1+GAP)이 실측 etf_true와 같은 수준(달러)에서 시작한다.
+    # 그래야 Step 6-A에서 수익률뿐 아니라 가격 수준도 비교할 수 있다.
+    S0 = args.S0 if args.S0 is not None else float(df["nav_true"].iloc[0])
+    print(f"  NAV 계열: {nav_source}   T={T}   "
+          f"기간 {df['Date'].iloc[0].date()} ~ {df['Date'].iloc[-1].date()}   S0={S0}")
+
     actual_nav = np.asarray(log_returns_to_nav(pd.Series(actual_returns), S0=S0)).flatten()
+    # 실측 미국 ETF 가격 — 결합 검증(Step 6-A)의 기준 계열
+    actual_etf_true = np.asarray(df["etf_true"], dtype=float)
 
     # 캐시 체크
     cache_key = _sim_cache_key(base_dir, ar_order, S0, args.n_simulations, args.seed,
-                               args.gap_dist, args.kp_regimes, args.kp_dist)
+                               args.gap_dist, args.kp_regimes, args.kp_dist, nav_source)
     _skip_models = False
     cached_arrs, cached_meta = None, None
     if not args.no_cache:
@@ -241,7 +259,7 @@ def main():
     
     # GAP-1) 데이터 로드
     print("\n[GAP-1단계] 데이터 로드")
-    df_gap = load_gap_exog(base_dir=base_dir)
+    df_gap = align_to_nav_grid(df, load_gap_exog(base_dir=base_dir))
     gap_series = df_gap["etf_premium"]
     si_series  = df_gap["value"]
     vix_series = df_gap["btc_volatility"]
@@ -339,7 +357,7 @@ def main():
     
     # KP-1) 데이터 로드
     print("\n[KP-1단계] 데이터 로드")
-    df_kp = load_kp_exog(base_dir=base_dir)
+    df_kp = align_to_nav_grid(df, load_kp_exog(base_dir=base_dir))
     kp_series         = df_kp["Kimchi Premium"]
     volume_btc_series = df_kp["volume_btc"]
     kospi_vol_series  = df_kp["KOSPI_Volatility"]
@@ -442,6 +460,10 @@ def main():
             }, {
                 "gap_params": gap_params_dict,
                 "kp_params": kp_params_dict,
+                # Phase 2가 GAP/KP 계열을 같은 날짜 그리드로 맞추는 데 쓴다.
+                "nav_source": nav_source,
+                "S0": S0,
+                "T": min(T, T_gap, T_kp),
             })
 
     representative_kp = np.median(monte_carlo_kp_array, axis=0)
@@ -477,7 +499,7 @@ def main():
     )
 
     # ============================================================================
-    # [Step 5] 시뮬레이터 결합 + [Step 6] 통합 시뮬레이터 검증
+    # [Step 5] 시뮬레이터 결합 + [Step 6-A/6-B] 결합 시뮬레이터 검증
     #   ETF_KR(t) = NAV(t) * (1+GAP(t)) * (1+KP(t))
     # ============================================================================
     print("\n" + "=" * 80)
@@ -507,8 +529,56 @@ def main():
     print(f"  실제 결합 초기값: {actual_combined[0]:.4f}, 종료값: {actual_combined[-1]:.4f}")
     print(f"  시뮬 중앙값 초기: {representative_combined[0]:.4f}, 종료: {representative_combined[-1]:.4f}")
 
+    # ==================================================================
+    # [Step 6-A] 미국 ETF 결합 검증 — NAV x (1+GAP) 대 실측 etf_true
+    #
+    # 한국형 ETF는 실재하지 않으므로 3자 결합에는 대조할 실측 계열이 없다.
+    # 그러나 2자 결합 NAV x (1+GAP)에는 실측 대응물이 있다 — 미국 현물 BTC ETF의
+    # 시장가격 etf_true다. 따라서 "시뮬 NAV x (1+시뮬 GAP)이 실제 미국 ETF 가격을
+    # 재현하는가"가 관측 가능한 검정이 된다. 여기를 통과한 결합기에 한국 고유
+    # 프리미엄(KP)을 얹는 것이 Step 7이다.
+    #
+    # nav_true 사양에서는 GAP 정의상 실측끼리 항등식이 성립하므로 기준이 정확하다.
+    # BTC 현물 사양에서는 항등식이 아니라 추적 관계이므로, 이 검정은 "BTC 현물 기반
+    # 결합기가 실제 미국 ETF 가격을 재현하는가"라는 더 강한 물음이 된다.
+    # ==================================================================
+    print("\n[Step 6-A] 미국 ETF 결합 검증 (기준: 실측 etf_true)")
+    actual_us_etf = actual_etf_true[:min_T]
+    monte_carlo_us_etf_array = (monte_carlo_nav_array[:, :min_T]
+                                * (1.0 + monte_carlo_gap_array[:, :min_T]))
+
+    # nav_true 사양에서는 실측끼리 항등식이 성립한다. 어긋나면 정렬이 깨진 것이다.
+    # BTC 현물 사양에서는 항등식이 아니라 추적오차이므로 참고값으로만 출력한다.
+    identity_err = float(np.max(np.abs(actual_nav_c * (1.0 + actual_gap_c) - actual_us_etf)))
+    if nav_source == "nav_true":
+        print(f"  실측 항등식 max|NAV*(1+GAP) - etf_true| = {identity_err:.3e}")
+        if identity_err > 1e-6:
+            print("  [경고] 항등식이 어긋난다 - NAV/GAP 날짜 정렬을 확인할 것")
+    else:
+        rel = identity_err / float(np.max(np.abs(actual_us_etf)))
+        print(f"  실측 추적오차 max|NAV*(1+GAP) - etf_true| = {identity_err:.4f} "
+              f"(최대가 대비 {rel*100:.2f}%) - BTC 현물은 항등식이 아니다")
+
+    actual_us_returns = np.diff(np.log(actual_us_etf))
+    simulated_us_returns_array = np.diff(np.log(monte_carlo_us_etf_array), axis=1)
+    us_etf_statistical_tests = calculate_statistical_tests(
+        actual_returns=actual_us_returns,
+        simulated_returns_paths=simulated_us_returns_array,
+        alpha=0.05,
+    )
+    print(f"  PIT-KS: statistic={us_etf_statistical_tests['pit_ks']['ks_statistic']:.4f}, p-value={us_etf_statistical_tests['pit_ks']['ks_pvalue']:.4f}")
+    print(f"  VaR-Kupiec: LR_uc={us_etf_statistical_tests['kupiec']['lr_uc']:.4f}, p-value={us_etf_statistical_tests['kupiec']['pvalue']:.4f}, exceedance_rate={us_etf_statistical_tests['kupiec']['exceedance_rate']:.4f}")
+    _print_es(us_etf_statistical_tests['es'])
+    print(f"  VALID: {us_etf_statistical_tests['is_valid']}")
+    print(f"  최종값(달러): 실측 {actual_us_etf[-1]:.2f} / 시뮬 중앙 "
+          f"{np.median(monte_carlo_us_etf_array[:, -1]):.2f} / "
+          f"p5 {np.percentile(monte_carlo_us_etf_array[:, -1], 5):.2f} / "
+          f"p95 {np.percentile(monte_carlo_us_etf_array[:, -1], 95):.2f}")
+
     # ------------------------------------------------------------------
-    # [Step 6] 통합 검증 — 결합 가격의 로그수익률 기준
+    # [Step 6-B] 3자 결합 검증 — 실측 대리 계열 기준 (보조)
+    #   기준이 실측 한국 ETF가 아니라 실측 세 성분의 곱이므로, 이것은 예측 정확도가
+    #   아니라 "결합 절차의 정합성"에 대한 검정이다. 주검증은 Step 6-A다.
     #
     # NAV 기준 상대수익률 (ETF/NAV - 1)을 쓰면 대수적으로 GAP과 같아져
     # (nav*(1+gap)/nav - 1 = gap) NAV·KP 사양 변화에 반응하지 않는다.
@@ -516,7 +586,7 @@ def main():
     #   d log ETF = d log NAV + d log(1+GAP) + d log(1+KP)
     # 이므로 세 컴포넌트가 모두 검정에 반영된다.
     # ------------------------------------------------------------------
-    print("\n[Step 6] 통계적 검정 (결합 가격 로그수익률 기준)")
+    print("\n[Step 6-B] 3자 결합 검정 (기준: 실측 성분곱 대리 계열)")
 
     actual_combined_returns = np.diff(np.log(actual_combined))
     simulated_combined_returns_array = np.diff(np.log(monte_carlo_combined_array), axis=1)
@@ -534,7 +604,7 @@ def main():
     print(f"  VALID: {combined_statistical_tests['is_valid']}")
 
     # 시각화
-    print("\n[Step 6-보조] 시각화")
+    print("\n[Step 6-B] 시각화")
     create_all_visualizations(
         actual_nav=actual_combined,
         simulated_nav=representative_combined,
@@ -620,10 +690,19 @@ def main():
             },
             "T": T_kp,
         },
+        "us_etf": {
+            # Step 6-A 주검증: NAV x (1+GAP) 대 실측 미국 ETF 가격(etf_true)
+            "statistical_tests": us_etf_statistical_tests,
+            "T": min_T,
+            "basis": "actual etf_true (observed US spot BTC ETF price)",
+        },
         "combined": {
+            # Step 6-B 보조: 3자 결합 대 실측 성분곱 대리 계열
             "statistical_tests": combined_statistical_tests,
             "T": min_T,
+            "basis": "proxy = actual NAV x (1+actual GAP) x (1+actual KP)",
         },
+        "nav_source": nav_source,
         "n_simulations": args.n_simulations,
     }
     if not args.no_save:
@@ -699,6 +778,10 @@ def main():
             "representative_kp": representative_kp,
             "actual_kp": actual_kp,
             "T": T_kp,
+        },
+        "us_etf": {
+            "statistical_tests": us_etf_statistical_tests,
+            "T": min_T,
         },
         "combined": {
             "statistical_tests": combined_statistical_tests,

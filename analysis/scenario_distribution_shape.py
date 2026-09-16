@@ -37,7 +37,8 @@ import matplotlib
 matplotlib.use("Agg")
 
 from preprocessing.scenario_generator import generate_scenario_series
-from simulator.data_loader import load_gap_exog, load_kp_exog
+from simulator.data_loader import (load_gap_exog, load_kp_exog,
+                                   load_nav_exog_and_returns, align_to_nav_grid)
 from simulator.gap_ou_simulator import GapOUSimulator
 from simulator.kp_threshold_ou_simulator import KPThresholdOUSimulator
 from simulator.scenario_main import _build_hmm_with_fixed_k
@@ -52,7 +53,8 @@ def _build_simulators():
     meta = json.loads((_root / "results" / "simulator" / "cache" / "sim_meta.json")
                       .read_text(encoding="utf-8"))
     gp, kpp = meta["gap_params"], meta["kp_params"]
-    dg, dk = load_gap_exog(), load_kp_exog()
+    # 본 파이프라인과 같은 NAV 그리드를 쓴다 (결정 11).
+    dg, dk = align_to_nav_grid(load_nav_exog_and_returns(), load_gap_exog(), load_kp_exog())
 
     gap_sim = GapOUSimulator(
         kappa=gp["kappa"], mu=gp["mu"], sigma0=gp["sigma0"],

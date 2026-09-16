@@ -1,551 +1,192 @@
-# 연구 진행 정리 — Bitcoin ETF Price Estimation under Korean Financial Market
+# 연구 파이프라인 정리 — 한국형 비트코인 현물 ETF 가격 시뮬레이션
 
-> A Scenario-based Simulation
-> 정리 기준일: 2026-08-28 / 기준 커밋: `8b55590 (20260714_1)`
+> 정리 기준일: 2026-09-07 / 기준 사양: NAV = BTC 현물 + 1거래일 시차보정 (결정 11)
+> 표본: 2024-01-12 ~ 2025-05-22, 거래일 342일, 몬테카를로 N = 1,000, seed = 42
+
+이 문서는 **파이프라인 지도**다 — 어떤 코드가 어떤 순서로 무엇을 만드는지를 프레임워크
+11단계 구조로 정리했다.
+
+| 문서 | 역할 |
+|---|---|
+| **이 문서** | 파이프라인 구조, 모듈·산출물 지도, 재현 절차 |
+| [DECISIONS_AND_RESULTS.md](DECISIONS_AND_RESULTS.md) | **결과와 결정의 기록.** 수치는 여기가 기준이다 |
+| [DISCUSSION.md](DISCUSSION.md) | 보조 진단 2건 (GAP `delta2`, 꼬리 비대칭) |
 
 ---
 
 ## 0. 핵심 아이디어
 
-한국형 비트코인 ETF 가격을 **3개 컴포넌트의 곱**으로 분해하여 각각 별도 확률과정으로 모델링하고,
-결합한 뒤 레짐 기반 시나리오별 리스크를 평가한다.
+한국에는 비트코인 현물 ETF가 없다. 상장된다고 가정하고 그 가격을 세 성분의 곱으로
+분해해 각각 별도 확률과정으로 모델링한 뒤, 결합해 가격 경로를 생성한다.
 
 ```
-ETF_KR(t) = NAV(t) x (1 + GAP(t)) x (1 + KP(t))      <- 초기값 10,000원 앵커
-              |          |               |
-              |          |               +-- 김치프리미엄  : Threshold-OU (3레짐)
-              |          +------------------ ETF 괴리율    : OU + 외생변수 연동
-              +----------------------------- 기초자산 NAV  : ARIMAX-GARCH-t
+ETF_KR(t) = NAV(t) × (1 + GAP(t)) × (1 + KP(t))
 ```
+
+| 성분 | 뜻 | 모형 | 실측 계열 |
+|---|---|---|---|
+| **NAV** | 기초자산(BTC) 가치 | ARIMAX(1,0,1)-GARCH(1,1)-t | blockchain.info BTC 현물 (시차보정) |
+| **GAP** | ETF 괴리율 | OU + 외생변수 연동 + Student-t | `etf_true/nav_true − 1` (IBIT) |
+| **KP** | 김치프리미엄 | Threshold-OU 2레짐 + Student-t | Upbit/Binance |
+
+**검증의 뼈대**: 한국형 ETF는 실재하지 않으므로 3자 결합에는 대조할 실측 계열이 없다.
+그러나 앞의 두 성분 `NAV × (1+GAP)`에는 실측 대응물이 있다 — **미국 현물 BTC ETF의
+시장가격**이다. 거기까지를 실측으로 검증하고(Step 6-A), 그 결합기에 한국 고유
+프리미엄을 얹는다(Step 7).
 
 ---
 
-## 1. 전체 파이프라인 흐름
+## 1. 파이프라인 11단계
 
-```
-[1] 데이터 수집
-    data_variables.py / data_Modeling.py / data_feature.py / kp_data.py / trend/fetch_trends.py
-        |
-        v  dataset/raw/*.csv
-[2] 학습데이터 생성
-    dataset/make_train_data.py       -> dataset/train/      (2024-01-12 ~ 2025-05-23, 약 343일)
-    dataset/make_train_data_ver1.py  -> dataset/train_ver1/ (2022-05-01 ~ 2025-05-23, 3년 확장)
-        |
-        +--> [3] 모델 후보 비교 (compare/, compare_gap/, compare_kp/, btc_etf_valid/)
-        |         -> results/compare_results, results/gap_results
-        |
-        +--> [4] 본 모델 Base 시뮬레이션 (simulator/main.py)          [train/ 사용]
-        |         -> results/simulator/
-        |
-        +--> [5] 레짐 전처리 (preprocessing/run_pipeline.py)          [train_ver1/ 사용]
-                  HAR-VKOSPI -> Gaussian HMM (5개 변수)
-                      |
-                      v
-             [6] 시나리오 선정 (analysis/)
-                  pairwise_regime_cooccurrence.py -> 1_scenario_selection.py
-                      -> results/scenario_selection/final_scenarios_latest.csv (S01~S09)
-                      |
-                      v
-             [7] 시나리오 시뮬레이션 (simulator/scenario_main.py)
-                      -> results/scenario_simulator/
-                      |
-                      v
-             [8] Base 대비 유의성 검정 (simulator/results_main.py)
-                      -> results/scenario_simulator/significance_test/
-```
+### Phase 1 — Base 시뮬레이션 (Step 1~7)
+
+| Step | 내용 | 코드 | 산출물 |
+|---|---|---|---|
+| 1 | 데이터 수집 | `data_variables.py`, `data_Modeling.py`, `data_feature.py`, `kp_data.py`, `trend/fetch_trends.py` | `dataset/raw/` |
+| 2 | 학습 데이터 생성 | `dataset/make_y_variables.py`, `make_train_data.py`, `make_train_data_ver1.py` | `dataset/train/`, `dataset/train_ver1/` |
+| 3 | 모형 선정 | 선행연구 + 데이터 특성 (`analysis/data_characteristics.py`) | `results/data_characteristics/` |
+| 4 | 개별 시뮬레이터 검증 | `simulator/main.py` (NAV·GAP·KP 각각) | `results/simulator/validation_results.json` |
+| 5 | 시뮬레이터 결합 | `simulator/main.py` | `results/simulator/combined_simulation_results.csv` |
+| **6-A** | **미국 ETF 결합 검증 (주검증)** | `simulator/main.py` | `validation_results.json` → `us_etf` |
+| 6-B | 3자 결합 검증 (보조) | `simulator/main.py` | `validation_results.json` → `combined` |
+| 7 | 한국형 ETF 가격 경로 | `simulator/main.py` (10,000원 앵커) | `results/simulator/korean_etf_price.csv` |
+
+**Step 6-A와 6-B의 지위가 다르다.** 6-A는 관측 가능한 실측 계열(`etf_true`)과 대조하므로
+주검증이고, 6-B는 기준이 실측 세 성분의 곱(반사실)이므로 예측 정확도가 아니라 **결합
+절차의 정합성**에 대한 보조 검정이다.
+
+### Phase 2 — 시나리오 분석 (Step 8~11)
+
+| Step | 내용 | 코드 | 산출물 |
+|---|---|---|---|
+| 8 | 레짐 전처리 + 시나리오 설계 | `preprocessing/run_pipeline.py`, `analysis/pairwise_regime_cooccurrence.py`, `analysis/1_scenario_selection.py` | `results/preprocessing/`, `results/scenario_selection/` |
+| 9 | 시나리오별 외생변수 생성 | `simulator/scenario_main.py` | `results/scenario_exog_vars/` |
+| 10 | 시나리오별 시뮬레이션·검증 | `simulator/scenario_main.py` | `results/scenario_simulator/` |
+| 11 | Base 대비 유의성 검정 | `simulator/results_main.py` | `results/scenario_simulator/significance_test/` |
+
+**Step 8은 3년 확장 표본(`dataset/train_ver1/`, 2022-05-02 ~ 2025-05-23, 750일)** 을 쓴다.
+레짐 구조는 긴 표본에서 식별하고 시뮬레이션은 342일 표본에서 수행하는 이원 구조이며,
+프레임워크가 Phase 1과 Phase 2를 분리하므로 의도된 설계다(논문에 명시 필요).
+
+> **Step 10은 모수를 재추정하지 않는다.** Base 모수를 고정하고 외생변수만 교체한다.
+> 프레임워크 그림 표기와 어긋나므로 하나로 맞춰야 한다
+> ([DECISIONS_AND_RESULTS.md](DECISIONS_AND_RESULTS.md) 13.1절).
 
 ---
 
-## 2. 단계별 상세
+## 2. 검증 체계
 
-### 2.1 데이터 수집
+**검정 3종** (프레임워크가 규정)
 
-| 파일 | 역할 | 출처 |
-|---|---|---|
-| `data_variables.py` | 온체인 지표 + Google Trends + 환율/금리 수집 | blockchain.info, yfinance, holidays |
-| `data_Modeling.py` | 위와 유사 + pyupbit 국내 거래량 | blockchain.info, yfinance, pyupbit |
-| `data_feature.py` | 수집(1~11) + 보조지표 + 마스터 병합, CLI 형태 | CoinGecko, Upbit, Binance, FRED, BOK |
-| `kp_data.py` | 김치프리미엄 계산: `BTC_KRW / (BTC_USD x USD_KRW) - 1` | 로컬 CSV |
-| `trend/fetch_trends.py` | Google Trends SVI (글로벌 `bitcoin_all_`, 한국 `bitcoin_kr_`) | pytrends |
-| `dataset/make_y_variables.py` | `y_variables.csv` 생성 (`Log Return` 재현 경로) | blockchain.info |
-
-수집 기간(주 분석): **2024-01-12 ~ 2025-05-23**
-
-**`Log Return` 정의** — 거래일 그리드(미국 영업일 − 연방공휴일, 343일)로 **먼저 필터링한 뒤 로그차분**한다.
-BTC는 24/7 거래되므로 전체 달력에서 먼저 로그차분하면 `shift(1)`이 1 거래일이 아니라 1 달력일 차분이 되고,
-이후 주말 행을 제거할 때 금→월 이동이 통째로 사라진다. 필터를 먼저 적용하면 금→월이 하나의 관측치로 보존된다.
-`etf_premium`(= `etf_true/nav_true − 1`)과 `Kimchi Premium`은 수준 비율이라 차분 순서의 영향을 받지 않는다.
-`btc_volatility`(→ `Global_RV`)는 전체 달력에서 RV를 **집계한 뒤** 거래일로 샘플링하므로 동일 이슈가 없다.
-
-### 2.2 학습 데이터
-
-| 디렉터리 | 기간 | 파일 | 사용처 |
-|---|---|---|---|
-| `dataset/train/` | 2024-01-12 ~ 2025-05-23 (343일) | `nav_train.csv`, `gap_train_main.csv`, `kp_train_main.csv` | `simulator/` (Base 시뮬레이션) |
-| `dataset/train_ver1/` | 2022-05-01 ~ 2025-05-23 (3년) | `nav_train.csv`, `gap_train.csv`, `kp_train.csv` | `preprocessing/`, `analysis/` (HMM·시나리오) |
-
-주요 변수 매핑:
-
-| 논리명 | 소스 컬럼 | 설명 |
-|---|---|---|
-| `global_btc_svi` | `gap_train["value"]` | Google Trends 글로벌 (0~100) |
-| `domestic_btc_svi` | `kp_train["bitcoin_kr"]` | Google Trends 한국 (0~100) |
-| `btc_volume_btc` | `kp_train["volume_btc"]` | 국내 BTC 일별 거래량 |
-| `VKOSPI` | `kp_train["KOSPI_Volatility"]` | 일별 VKOSPI (ver1은 ^KS11 30일 RV로 대체) |
-| `Global_RV` | `gap_train["btc_volatility"]` | BTC 30일 롤링 실현변동성 |
-
-### 2.3 모델 후보 비교 (벤치마킹)
-
-각 컴포넌트에 어떤 확률과정이 적합한지 사전 검증.
-
-**NAV** — `compare/compare_main.py` (N=5000)
-
-| 모델 | PIT-KS p | Kupiec p | is_valid |
-|---|---|---|---|
-| GBM | 0.569 | 0.057 | O |
-| GARCH | 0.151 | **0.005** | **X** |
-| Heston | 0.773 | 0.106 | O |
-| Poisson-Gaussian | 0.414 | 0.483 | O |
-| Merton-JD | 0.295 | 0.783 | O |
-| ARIMA-GARCH | (구현 존재) | | |
-
-**GAP** — `compare_gap/gap_main.py`
-
-| 모델 | PIT-KS p | Kupiec p | is_valid |
-|---|---|---|---|
-| OU | 0.190 | 0.946 | O |
-| Heston-SV | 0.359 | 0.946 | O |
-| GARCH | **1.13e-21** | 1.000 (초과 0건) | **X** |
-
-**KP** — `compare_kp/kp_main.py` : OU, Heston-SV를 gap과 동일 절차로 비교
-
-**ETF 조합 검정** — `btc_etf_valid/etf_valid_main.py`
-NAV{Heston, ARIMA-GARCH} x GAP{Heston-SV, OU} 4개 조합으로 `ETF = NAV x (1+gap)` 구성 후 `etf_true`와 대조.
-
-**검증 지표 체계** (`compare/metrics.py`, 889줄)
-- 통계 검정: PIT-KS, VaR-Kupiec(LR_uc), ES backtest
-- 경로/분포 지표: DTW, PMC, RVR, VVS, VPR, VJC, TWAD, KS, 분포 적률, VaR/ES proximity
-- **예측구간 커버리지 (PICP / NMPIW)** — `interval_coverage()`, `coverage_metrics()`
-  - 각 시점 t에서 MC 경로의 분위수로 명목 (1-a) 예측구간을 만들고, 실제값이 그 안에 들어간 시점의 비율을 센다
-  - `PICP_lv` = 경험적 커버리지(명목수준에 가까울수록 좋음), `CovErr` = mean |경험적 - 명목| (낮을수록 좋음)
-  - 커버리지만 보면 구간을 넓게 잡을수록 유리하므로, 구간폭을 실제 변동범위로 정규화한
-    `NMPIW95`를 함께 본다(낮을수록 좁고 예리한 구간). 명목수준 3종(50/80/95%) 사용
-  - **판정 기준: `coverage_reference()` / `coverage_percentile()`** — 시뮬 경로 하나를 관측치인
-    척 놓고 나머지가 만든 밴드로 커버리지를 재는 일을 반복해 모형 내재 귀무분포를 만든다
-    (사후예측검정). 관측값이 이 분포의 5~95 백분위 안이면 모형과 모순되지 않는다.
-    밴드는 전체 경로로 한 번만 계산하므로(leave-one-out 효과는 1/N) 300경로 기준 0.22초에 끝난다
-
-> 이전에는 자체 고안 지표 WMCR(Weighted Multi-band Capture Rate)을 썼으나 제거했다.
-> WMCR의 밴드는 `MC 경로 min/max의 중점 +- p%`로 정의되는데, min/max는 표본크기 N에 따라
-> 발산하는 통계량이라 밴드폭이 모델 분포가 아니라 N에 끌려간다. 예측구간 커버리지는
-> 분위수 기반이라 이 문제가 없고, 예측문헌의 표준 관행이라 별도 방법론 정당화가 필요 없다.
-
-### 2.4 본 모델 (Base) — `simulator/main.py`
-
-| 컴포넌트 | 모형 | 외생변수 |
-|---|---|---|
-| NAV | ARIMAX(1,0,1)-GARCH(1,1)-t | Hash Rate, Unique Addresses |
-| GAP | OU, `mu_t = mu_0 + gamma1*SI`, `sigma_t = sigma_0 * exp(delta1*RV)` | Search Interest, BTC RV |
-| KP | Threshold-OU 3레짐 (abs(KP)<=tau / KP>tau / KP<-tau), tau 최적 탐색 | volume_btc, KOSPI_Volatility, bitcoin_kr |
-
-몬테카를로 N=1000, seed=42, MD5 기반 결과 캐싱(`results/simulator/cache/`).
-
-**Base 검증 결과** (`results/simulator/validation_results.json`, T=343)
-
-| 대상 | PIT-KS p | Kupiec p | ES tail_error | is_valid | DTW Price | PMC |
-|---|---|---|---|---|---|---|
-| NAV | 0.979 | 0.652 | +0.00334 | O | 0.062 | 0.472 |
-| GAP | 0.263 | 0.349 | -0.00052 | O | 0.136 | 0.460 |
-| KP | 0.904 | 0.243 | -0.00284 | O | 0.160 | 0.509 |
-| Combined | 0.354 | 0.652 | -0.00144 | O | 0.062 | 0.467 |
-
-**예측구간 커버리지** (같은 실행, 명목 50/80/95%)
-
-> **판정은 명목수준이 아니라 모형 내재 기준분포의 백분위로 한다.** 아래 "커버리지 해석" 참조.
-
-| 대상 | PICP50 | (백분위) | PICP95 | (백분위) | CovErr | (백분위) | NMPIW95 | 판정 |
-|---|---|---|---|---|---|---|---|---|
-| NAV | 0.741 | 73.0 | 0.994 | 29.5 | 0.135 | 44.0 | 1.860 | 정상 |
-| **GAP** | 0.580 | **100.0** | 0.942 | 19.5 | 0.038 | **99.0** | 0.526 | **이상** |
-| KP | 0.467 | 33.0 | 0.945 | 38.5 | 0.017 | 15.0 | 0.642 | 정상 |
-| Combined | 0.746 | 75.5 | 0.988 | 25.0 | 0.123 | 35.0 | 1.847 | 정상 |
-
-양측 경험적 p-value (기준분포 표본 B=2000, 6개 비교 -> Bonferroni 임계값 0.0083):
-
-| | PICP50 관측 | 기준 중앙값 | 양측 p | 보정 후 |
-|---|---|---|---|---|
-| NAV | 0.741 | 0.536 | 0.500 | 유의하지 않음 |
-| **GAP** | 0.580 | 0.502 | **< 0.0005** | **유의** |
-| KP | 0.467 | 0.507 | 0.630 | 유의하지 않음 |
-
-**커버리지 해석** — 단일 경로의 PICP를 명목수준과 직접 비교하면 안 된다. 가격 경로는 자기상관이
-강해 유효표본이 T가 아니고, 그래서 PICP는 분산이 크고 오른쪽으로 치우친다. NAV의 경우 모형이
-옳다는 전제에서도 PICP50의 90% 구간이 0.049~0.919, CovErr 중앙값이 0이 아니라 0.148이다
-(평균 커버리지는 명목과 일치: 0.503 / 0.793 / 0.944). 반면 GAP은 평균회귀라 관측이 거의 독립이어서
-기준분포가 0.50 근처로 좁게 모인다. **같은 숫자라도 프로세스 성질에 따라 의미가 완전히 다르다.**
-
-**GAP — 주검증은 통과하나 꼬리가 두껍다는 신호가 있다.** 분산은 완벽하다.
-
-| | 실제 | 시뮬 중앙 | 실제의 백분위 | 양측 p |
-|---|---|---|---|---|
-| 수준 std | 0.00417 | 0.00417 | 50.3 | - |
-| 변화 std | 0.00568 | 0.00565 | 55.3 | - |
-| 초과첨도 (수준) | +2.147 | +0.128 | 99.8 | 0.0040 |
-| **초과첨도 (변화량)** | **+1.282** | **+0.075** | **99.0** | **0.0200** |
-| 중심 50%구간 점유 | 0.577 | 0.507 | 99.9 | - |
-| 꼬리 abs(z)>1.96 | 0.064 | 0.050 | 93.9 | - |
-
-**주검증 3종과 모순되지 않는다 — 검정력 차이다.** PIT-KS는 `u_t = ECDF_t(r_t)`의 균등성을 보는
-전방위 검정이고, KS 통계량은 꼬리에서 검정력이 낮다. 첨도 불일치는 정확히 꼬리에서 일어나므로
-KS(p=0.263)는 놓치고, 그 대안을 겨냥한 표적 통계량(첨도, 커버리지)은 잡아낸다.
-**"통과"는 "분포가 일치한다"가 아니라 "기각할 증거가 부족하다"이다.**
-
-증거 강도는 중간이다. 가장 강한 것은 PICP50(p < 0.0005)이고, 변화량 첨도는 p=0.020으로
-누적 비교 횟수를 감안하면 압도적이지 않다. 수준·변화량 모두 같은 방향인 점은 일관된다.
-
-**결정: 모형을 바꾸지 않고 한계로 기록한다.** 프레임워크가 정한 판정 기준(PIT-KS/Kupiec/ES)을
-통과했고, GAP 사양을 바꾸면 Step 10 재추정과 Step 11 유의성 검정을 전부 다시 돌려야 하는데
-그만한 증거가 아니다. 처방 후보(보류): OU 혁신항을 Student-t로 — NAV가 이미 ARIMA-GARCH-t를
-쓰므로 모형 체계상 일관되고 Step 3 범위 내 변경이다.
-
-> **정정 기록** — 2026-08-29 작업 중 커밋 `75f50b0`/`f2cac69`의 메시지와 이 절의 이전 판에서
-> "NAV는 과대분산"이라고 서술했으나 **오판이며 철회한다.** PICP50=0.741을 명목 0.50과 직접
-> 비교한 것이 원인이었다. 기준분포로 재판정하면 NAV는 양측 p=0.500으로 정상이고, 일별
-> 로그수익률 std도 실제 0.03403 대 시뮬 0.03505(비율 1.030)로 거의 일치한다.
-> 같은 이유로 "Combined가 NAV의 과대분산을 상속한다"는 서술도 철회한다(Combined 백분위 35.0).
-
-`is_valid`는 PIT-KS와 Kupiec의 p-value만으로 판정한다. ES는 p-value 없는 진단 지표(tail_error)라 판정에 포함하지 않는다.
-NAV 적합 모수: mu=0.002538, phi1=-0.494257, theta1=0.427565, omega=3.969064, alpha1=0.070138, beta1=0.610203, nu=4.178673.
-Combined(Step 6)는 `NAV x (1+GAP) x (1+KP)` 3자 결합을 결합가격의 로그수익률로 검정한다.
-`d log ETF = d log NAV + d log(1+GAP) + d log(1+KP)`이므로 세 컴포넌트가 모두 반영된다.
-(이전에는 2자 결합을 `ETF/NAV - 1`로 검정해 대수적으로 GAP과 같아졌고, NAV 사양 변경에
-반응하지 않았다 — 커밋 `f2cac69`에서 수정.)
-
-산출물: `nav/gap/kp/combined_simulation_results.csv`, `korean_etf_price.csv`, `plots/{nav,gap,kp,combined}/`
-
-### 2.5 레짐 전처리 — `preprocessing/`
-
-| 모듈 | 내용 |
+| 검정 | 무엇을 보나 |
 |---|---|
-| `har_vkospi.py` | HAR(d=1, w=5, m=22)로 VKOSPI 적합 -> 평균회귀 사이클 제거한 **표준화 잔차** 추출 |
-| `gaussian_hmm.py` | hmmlearn GaussianHMM. K 결정 = BIC(K=2 vs 3) + **Bootstrap LRT B=1000** + 레짐 점유율 >= 10% |
-| `asvi_transformer.py` | ASVI = `(X_t - mean(X[t-k:t-1])) / std(X[t-k:t-1])`, k=4주, look-ahead 없음 |
-| `scenario_generator.py` | 레짐 조건부 외생변수 시계열 생성 + MC |
-| `run_pipeline.py` | Step1 로드 -> Step2 HAR -> Step3 HMM(주별 SVI/Volume) -> Step4 HMM(일별 변동성), pickle 캐시 |
+| PIT-KS | 실제 값이 시뮬 분포 안에서 균등하게 흩어져 있는가 |
+| VaR-Kupiec | 5% VaR 초과 횟수가 명목수준과 맞는가 (LR_uc) |
+| ES | 초과 시 평균 손실 크기 (모수적 부트스트랩 p-value) |
 
-로그 변환: `Global_RV` -> log / SVI·Volume -> log1p / `VKOSPI_resid` -> 없음
+**검증 대상 5종**
 
-**레짐 변수 5종**
-
-| 변수 | 표시명 | 상태 | 주기 |
+| 단계 | 대상 | 기준 계열 | 성격 |
 |---|---|---|---|
-| `Global_RV_regime` | Bitcoin_RV | Low / Mid / High | 일별 |
-| `VKOSPI_resid_regime` | VKOSPI | Normal / Extreme | 일별 |
-| `btc_volume_btc_regime` | KR_Volume | Low / High | 주별 -> ffill |
-| `domestic_btc_svi_regime` | KR_SVI | Low / High | 주별 -> ffill |
-| `global_btc_svi_regime` | Global_SVI | Low / Mid / High | 주별 -> ffill |
+| 4 | NAV / GAP / KP | 각 성분의 실측 계열 | 개별 검증 |
+| **6-A** | NAV × (1+GAP) | **실측 `etf_true`** | **결합 주검증** |
+| 6-B | NAV × (1+GAP) × (1+KP) | 실측 성분곱 대리 계열 | 결합 정합성 (보조) |
 
-### 2.6 시나리오 선정 — `analysis/`
-
-1. `pairwise_regime_cooccurrence.py` — 5변수 레짐 쌍별 공통빈도 / lift 분석 -> `results/pairwise_regime_cooccurrence_results.xlsx`
-2. `1_scenario_selection.py` — MODE A(HMM 분류 테이블 생성) / MODE B(테이블 로드 후 선택). diversity·lift 임계값으로 최종 시나리오 확정.
-
-**최종 시나리오** (`results/scenario_selection/final_scenarios_latest.csv`)
-
-| ID | Bitcoin_RV | VKOSPI | KR_Volume | KR_SVI | Global_SVI | 공동빈도 | lift 평균 |
-|---|---|---|---|---|---|---|---|
-| S01 | Low | Normal | Low | Low | Mid | 67 | 1.131 |
-| S02 | Mid | Normal | High | High | High | 45 | 1.095 |
-| S03 | Low | Normal | Low | Low | Low | 23 | 1.169 |
-| S04 | Mid | Normal | Low | Low | Low | 22 | 1.140 |
-| **S05** | **High** | **Extreme** | **High** | **High** | **High** | 21 | **1.260** |
-| S06 | Mid | Normal | High | High | Mid | 17 | 0.942 |
-| S07 | Mid | Normal | Low | Low | Mid | 11 | 1.042 |
-| S08 | Mid | Normal | High | High | Low | **0** | - |
-| S09 | High | Extreme | High | High | Mid | **0** | - |
-
-S05 = 위기 시나리오(고변동성 + KOSPI 극단 + 관심도/거래량 급증). S08·S09는 이론적으로만 정의되고 관측 0건.
-
-### 2.7 시나리오 시뮬레이션 — `simulator/scenario_main.py`
-
-방법: **실제 GAP/KP 시계열은 유지**하고, 외생변수만 시나리오 레짐에서 생성한 시계열로 교체 -> 모수 재추정 -> MC.
-
-외생변수 매핑:
-- GAP 모델: `global_btc_svi` -> Search Interest, `Global_RV` -> VIX Volatility
-- KP 모델: `btc_volume_btc` -> volume_btc, `VKOSPI_resid` -> KOSPI_Volatility, `bitcoin_kr`은 실제 데이터 유지
-
-커밋 이력상 **두 갈래**가 존재:
-- `f14c00a 20260626_para_reestimate` — 시나리오별 모수 재추정
-- `df14167 20260626_fixed_parameter_ver` — 모수 고정, 외생변수만 교체
-
-**결과** (`results/scenario_simulator/korean_etf_risk_metrics.csv`)
-
-| Scenario | VaR_95 | CVaR_95 | VaR_99 | CVaR_99 | Max_DD_mean | Volatility | Skew | Kurt | p50 | p95 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Base | 5,951 | 4,679 | 3,794 | 3,508 | -0.41 | 571.7 | 4.00 | 31.80 | 16,612 | 52,261 |
-| S05 | 5,936 | 4,693 | 3,797 | 3,524 | -0.41 | 582.4 | 4.19 | 35.47 | 16,674 | 52,361 |
-
-모수 비교 (`comparison_summary.csv`):
-
-| | gap_kappa | gap_mu | gap_sigma0 | gap_delta1(SI) | gap_delta2(VIX) |
-|---|---|---|---|---|---|
-| Base | 0.9149 | 0.000475 | 0.004118 | 0.1136 | -0.0729 |
-| S05 | 0.9375 | 0.000459 | 0.004157 | 0.0279 | 0.0377 |
-
-`comparison_summary.csv`의 WMCR 컬럼(`gap_wmcr_pass`/`kp_wmcr_pass`)은 제거됐고
-`gap_picp95`/`gap_cov_err`/`kp_picp95`/`kp_cov_err`로 대체됐다. 위 표의 숫자는
-WMCR 제거 이전 실행 기준이므로, 시나리오 시뮬레이션 재실행 후 갱신이 필요하다.
-
-### 2.8 유의성 검정 — `simulator/results_main.py` (최신 작업)
-
-시나리오 지표 차이가 MC 노이즈인지, Base 대비 통계적으로 유의한 차이인지 검정.
-
-절차:
-1. Base/각 시나리오를 **M=100회 독립 반복** x N=1000경로. 반복 m마다 **공통 난수(CRN)** 사용해 base_m과 scenario_m을 짝지음.
-2. GAP/KP 모수는 Base·시나리오 공통 고정, NAV 경로는 캐시 재사용 -> 차이는 오직 외생변수에서만 발생
-3. 반복별 `diff_m = Scenario_m - Base_m`
-4. Shapiro-Wilk 정규성 검정 -> 만족 시 대응표본 t-검정, 위반 시 Wilcoxon 부호순위(정규근사)
-5. p < 0.05 -> 유의. 다중비교 보정 미적용 (Rothman 1990: 사전 설계된 시나리오이므로 만능귀무가설 부적절)
-
-**판정 기준** — M=100 대응표본에 CRN을 적용하면 SE가 매우 작아져 0.5% 수준의 차이도 p<0.05가 된다
-(실제로 수정 전 계열에서는 8지표 x 9시나리오 = 72개 비교가 전부 유의했다). p-value만으로는 변별이 되지 않으므로
-**유의성과 효과크기를 함께** 본다. 임계값은 지나치게 좁히지 않도록 완만하게 잡았다.
-
-> `priority` = p < 0.05 **그리고** |효과크기| >= 0.25%,  그 외 `noise`
-
-효과크기 분포에서 CVaR_99(0.50%)와 VaR_95(0.15%) 사이에 자연스러운 간격이 있어 그 사이에 임계값을 두었다.
-0.25%는 8개 지표 중 6개를 `priority`로 남기는 관대한 선이다. 민감도: 0.18~0.25% 구간에서는 아래 표가 그대로이고,
-0.45%까지 올려도 `priority` 지표 구성(6개)은 바뀌지 않는다(일부 시나리오에서 Max_DD_mean·CVaR_99가 빠질 뿐).
-
-**결론** (`significance_test/significance_matrix_flag.csv` + `effect_size_matrix_pct.csv`)
-
-| 지표 | 효과크기(중앙) | S01 | S02 | S03 | S04 | S05 | S06 | S07 | S08 | S09 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Volatility | 2.95% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| p50 | 0.92% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| VaR_99 | 0.78% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| Max_DD_mean | 0.70% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| CVaR_95 | 0.53% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| CVaR_99 | 0.50% | priority | priority | priority | priority | priority | priority | priority | priority | priority |
-| VaR_95 | 0.15% | noise | noise | noise | noise | noise | noise | noise | noise | noise |
-| p95 | 0.07% | noise | noise | noise | noise | noise | noise | noise | noise | noise |
-
--> **시나리오 간 차이는 변동성에서 가장 뚜렷하고**(2.95%, 다른 지표의 3배 이상), 중앙값·꼬리 평균(CVaR)·
-최대낙폭·VaR_99에서도 일관되게 나타난다. 반면 **분포 양끝단(VaR_95, p95)에서는 실질적 차이가 없다.**
-9개 시나리오 모두 같은 패턴이라 지표별 판정이 시나리오에 따라 흔들리지 않는다.
-
-`p5`는 산출 정의상 `VaR_95`와 항상 같은 값이라 지표 목록에서 제외했다(8개 지표).
-
-**참고** — 이 표는 `Log Return` 수정(2.1 참조) 이후의 결과다. 수정 전에는 72개 비교가 전부 유의해
-지표 간 변별이 되지 않았고, 수정 후 VaR_95(0.49%→0.15%)와 p95(0.54%→0.07%)의 효과크기가 줄면서
-분포 양끝단이 분리되었다. 수정 전 결과는 `significance_test_preW/`에 보존되어 있다.
+현재 사양에서 **5개 전부 통과**한다. 수치는
+[DECISIONS_AND_RESULTS.md](DECISIONS_AND_RESULTS.md) 9.2절 참조.
 
 ---
 
-## 3. 산출물 지도
+## 3. 재현 절차
+
+```bash
+# Phase 1 — Base 시뮬레이션 및 검증
+python simulator/main.py
+
+# 주요 옵션
+python simulator/main.py --nav-source btc        # 시차보정 없는 BTC 현물 (구 사양)
+python simulator/main.py --nav-source nav_true   # IBIT 주당 NAV (펀드 비용 포함)
+python simulator/main.py --gap-dist normal       # GAP 혁신항을 정규분포로
+python simulator/main.py --kp-dist normal        # KP 혁신항을 정규분포로
+python simulator/main.py --kp-regimes 3          # KP를 3레짐으로
+python simulator/main.py --no-cache              # 캐시를 읽지 않고 강제 재실행
+
+# Phase 2 — 시나리오 시뮬레이션 및 유의성 검정
+python simulator/scenario_main.py --scenarios S01,S02,S03,S04,S05,S06,S07,S08,S09
+python simulator/results_main.py  --scenarios S01,S02,S03,S04,S05,S06,S07,S08,S09
+
+# 보조 분석 (본 파이프라인과 독립)
+python analysis/data_characteristics.py          # Step 3 데이터 특성 근거
+python analysis/gap_delta2_diagnostic.py         # GAP delta2 유의성 (약 5분)
+python analysis/scenario_distribution_shape.py   # 시나리오별 분포 형태 (약 3분)
+python analysis/fanchart.py                      # 발표용 팬차트 2종
+```
+
+**소요 시간**: Phase 1 약 2분, Step 9·10 약 2분, **Step 11 약 35분**(100회 반복 × CRN × 두 기준).
+
+`scenario_main.py`와 `results_main.py`는 `--scenarios`를 생략하면 `input()`으로 묻는다.
+비대화형(리다이렉트·CI·백그라운드)에서는 EOFError로 죽으므로 ID를 명시해야 한다.
+
+`--nav-source`를 바꾸면 표본 구간(`btc`는 343일, 나머지는 342일이며 시작·종료일도 다르다)과
+캐시 키가 함께 바뀌므로 Phase 1을 먼저 다시 돌려야 한다. Phase 2는 `sim_meta.json`의
+`nav_source`를 읽어 자동으로 따라간다.
+
+---
+
+## 4. 산출물 지도
 
 | 경로 | 내용 |
 |---|---|
-| `results/preprocessing/` | HAR 플롯, HMM 플롯(hmm_svi/hmm_vol), bai_perron*, ASVI 변환, hmm_cache.pkl |
-| `results/regime_classified_table.csv` | 일별 레짐 분류 테이블 (MODE A 산출) |
-| `results/pairwise_regime_cooccurrence_results.xlsx` | 레짐 쌍별 공통빈도·lift |
-| `results/scenario_selection/` | 시나리오 후보/최종 (xlsx 10개 + final_scenarios_latest.csv) |
-| `results/scenarios/` | 시나리오별 히스토그램/레짐 시계열 플롯 (P01~P09) |
-| `results/scenario_exog_vars/` | 시나리오별 외생변수 시계열 |
-| `results/compare_results/`, `results/gap_results/` | 모델 후보 비교 결과 |
-| `results/simulator/` | **Base 시뮬레이션 최종 결과** + plots + cache |
-| `results/simulator/scenario_regime/` | gbm_regime_simulator 산출 (아래 이슈 참조) |
-| `results/scenario_simulator/` | 시나리오 시뮬레이션 (Base, S05) + significance_test |
+| `results/simulator/` | **Phase 1 최종 결과** — `validation_results.json`, 성분별 CSV, `korean_etf_price.csv`, plots, cache |
+| `results/simulator/cache/` | `sim_arrays.npz`(MC 경로 4종), `sim_meta.json`(모수·사양). **Phase 2가 이걸 읽는다** |
+| `results/scenario_simulator/` | 시나리오별 결과(S01~S09), `comparison_summary.csv`, `korean_etf_risk_metrics.csv` |
+| `results/scenario_simulator/significance_test/` | **Step 11 결과.** `effect_size_comparison.csv`(요약), `*_etf.csv` / `*_kr.csv`(기준별 상세) |
+| `results/figures/` | 발표용 팬차트 (`fanchart_us`, `fanchart_kr` — png/svg) |
+| `results/data_characteristics/` | Step 3 데이터 특성 검정 |
+| `results/discussion/` | DISCUSSION.md 진단 2건의 원자료 |
+| `results/preprocessing/` | HAR-VKOSPI, Gaussian HMM, Bai-Perron 플롯 |
+| `results/scenario_selection/` | 시나리오 후보·최종 (`final_scenarios_latest.csv`) |
+| `results/scenarios/`, `results/scenario_exog_vars/` | 시나리오별 레짐 플롯 / 외생변수 시계열 |
+| `results/compare_results/`, `results/gap_results/` | **모형 후보 비교 (코드는 삭제됨, 산출물만 잔존)** |
+| `results/_archive_pre_decision11/` | 결정 11 이전 산출물 보관 |
 
-### 3.1 다른 PC에서 이어서 작업할 때 — 착수 전 확인
+### 4.1 유의성 검정 결과 읽는 법
 
-`.gitignore:212`가 `results/` 전체를 제외하므로, **clone만으로는 아래 4개 파일이 없다.**
-이들은 산출물이 아니라 다음 단계의 **입력**이라, 없으면 시뮬레이터가 바로 실패한다.
-작업 시작 전 존재 여부를 먼저 확인할 것.
-
-```bash
-FILES="results/scenario_selection/final_scenarios_latest.csv
-results/cache/regime_df_cache.csv
-results/cache/scenario_hmm_arrays.npz
-results/simulator/cache/sim_arrays.npz"
-
-echo "$FILES" | while read -r f; do
-  [ -e "$f" ] && echo "OK   $f" || echo "없음 $f"
-done
-```
-
-| 파일 | 역할 | 없을 때 |
-|---|---|---|
-| `results/scenario_selection/final_scenarios_latest.csv` | S01~S09 시나리오 정의 | `scenario_main.py` / `results_main.py` 실행 불가 |
-| `results/cache/regime_df_cache.csv` | HMM 레짐 분류 캐시 | `results_main.py` FileNotFoundError |
-| `results/cache/scenario_hmm_arrays.npz` | HMM 모수 캐시 | HMM 재적합(`n_init=10, B=1000`) 발생 |
-| `results/simulator/cache/sim_arrays.npz` | Base MC 배열 (NAV/GAP/KP, 1000x343) | NAV·GAP·KP 전체 재시뮬레이션 |
-
-**전부 있으면** 그대로 이어서 작업하면 된다. `simulator/main.py`는 데이터 파일 MD5 기반으로
-캐시 유효성을 자체 판정하므로(`_sim_cache_key`), 입력이 바뀌었으면 알아서 재계산한다.
-
-**하나라도 없으면** 아래 순서로 재생성한다. 이 경로는 HMM을 다시 적합하므로
-S01~S09 레짐 조합이 달라질 수 있다 — 달라지면 2.6~2.8 결과를 다시 확인할 것.
-
-```bash
-python preprocessing/run_pipeline.py        # 레짐 분류 + HMM 캐시
-python analysis/1_scenario_selection.py     # final_scenarios_latest.csv
-python simulator/main.py                    # Base MC + sim_arrays.npz (~5분)
-echo all | python simulator/scenario_main.py
-echo all | python simulator/results_main.py # M=100 x N=1000, 약 25분
-```
-
-`dataset/` 이하는 전부 git 추적 대상이므로 별도 조치가 필요 없다.
-`data/`(원천 CSV: `IBIT Premium.csv`, `USD_KRW.csv`, `BTC_KRW.csv`)는 저장소에 없지만,
-현재 파이프라인은 이 디렉터리를 쓰지 않는다 — `data_Modeling.py` / `data_variables.py` /
-`kp_data.py` 를 직접 재실행할 때만 필요하다.
+**반드시 `_kr`(한국 요인) 기준을 주 결과로 쓸 것.** `_etf` 기준은 NAV의 누적 변동이
+분산을 지배해 시나리오 효과가 희석되고, 위기 시나리오에서 VaR 부호가 뒤집힌다.
+`_etf`는 "왜 `_kr` 기준을 채택했는지" 보이는 대조군으로만 쓴다
+([DECISIONS_AND_RESULTS.md](DECISIONS_AND_RESULTS.md) 10.4절).
 
 ---
 
-## 4. 정리 후보 — 검토 요청 항목
+## 5. 현재 사양 요약
 
-### 4.1 깨진 임포트 (현재 실행 불가)
-
-| 파일 | 존재하지 않는 대상 |
+| 항목 | 값 |
 |---|---|
-| `compare/compare_main.py` | `simulator.jump_detector`, `simulator.data_loader.load_nav_data` |
-| `compare/poisson_gaussian_simulator.py` | `simulator.nav_simulator`, `simulator.continuous_component`, `simulator.jump_detector` |
-| `simulator/gbm_regime_simulator.py` | `analysis.scenario_selection` (실제 파일명 `1_scenario_selection.py` — 숫자 접두사라 import 불가) |
+| 표본 | 2024-01-12 ~ 2025-05-22, 342 거래일 |
+| NAV | BTC 현물 로그수익률 + 1거래일 시차보정, S0 = 24.94달러 |
+| NAV 모형 | ARIMAX(1,0,1)-GARCH(1,1)-t, ν = 4.300 |
+| GAP 모형 | OU + Student-t, κ = 0.9345, ν = 5.074 |
+| KP 모형 | Threshold-OU 2레짐 + Student-t, τ = 0.043075, ν = 12.382 |
+| 몬테카를로 | N = 1,000, seed = 42 |
+| 시나리오 | S01~S09 (5개 외생변수 레짐 조합) |
+| Step 11 | 100회 반복 × CRN, 두 기준(etf / kr) |
 
-> 해소됨: `simulator/__init__.py`의 `__all__` 잔존 항목 3개는 WMCR 제거 작업에서 함께 삭제했다.
+**Base Volatility 절대값** (일별 로그수익률 표준편차 — 효과크기가 상대값이라 기준값이 필요)
 
-**결정 필요**: 이 파일들을 (a) 고쳐서 살릴지 (b) 삭제할지
-
-### 4.2 최종 파이프라인에서 벗어난 것으로 보이는 코드
-
-| 대상 | 줄수 | 상태 |
+| 기준 | 일별 | 연율화 |
 |---|---|---|
-| `simulation/regime_simulation.py` | 1,016 | 어디서도 import 안 됨. `simulator/scenario_main.py`로 대체된 초기 버전으로 추정. 폰트도 `NanumGothic`(타 파일은 `Malgun Gothic`) |
-| `simulator/gbm_regime_simulator.py` | 495 | 깨진 import + 결과 이상(4.4 참조) |
-| `data_Modeling.py` / `data_variables.py` / `data_feature.py` | 206/251/395 | blockchain.info 수집 로직 3중 중복 |
-| `settings.py` 일부 | - | `ARIMAX_CONFIG`, `GARCHX_CONFIG`, `MULTIPLE_TESTING`, `EDA_*`, `VARIABLES_DIR` 설정이 현행 코드에서 사실상 미사용 (`compare_main.py`가 `PROJECT_ROOT`만 참조) |
-| `eda/`, `plot/`, `correlation/` | - | 초기 탐색 단계 산출물. 논문 포함 여부 확인 필요 |
-| `etf/` | - | 가상환경 디렉터리가 저장소에 포함됨 |
-| `__pycache__/`, `*/__pycache__/` | - | 커밋된 캐시 |
-| `trend/bitcoin_all_ (1)~(5).csv` 등 | - | 병합 전 원본 12개. `merged_*.csv`만 있으면 되는지 확인 필요 |
-| `results/scenario_selection/*_2026*.xlsx` | 10개 | 타임스탬프 중간 산출물 |
-
-**결정 필요**: 각 항목 삭제 / 보존(논문 부록) / 아카이브 분리
-
-### 4.3 데이터셋 이원화
-
-- `simulator/` (Base·시나리오 시뮬레이션) -> `dataset/train/` (343일)
-- `preprocessing/`·`analysis/` (HMM·시나리오 선정) -> `dataset/train_ver1/` (3년)
-
-즉 **레짐을 3년 데이터로 추정하고, 시뮬레이션은 343일 데이터로 수행**하고 있음.
-의도된 설계라면 논문에 명시가 필요하고, 아니라면 한쪽으로 통일 필요.
-
-**결정 필요**: 최종본이 `train`인지 `train_ver1`인지
-
-### 4.4 결과 자체의 미완 / 이상
-
-1. **시나리오 시뮬레이션 미완** — `results/scenario_simulator/`에 **Base와 S05만** 존재. S01~S04, S06~S09 미실행.
-   (단, `significance_test/`는 S01~S09 전체 결과가 있음 — 별도 실행 경로)
-2. **`gbm_regime_simulator` 결과 이상** — `scenario_regime_risk_metrics.csv`에서 P01, P02, P06, P07, P08, P09 6개 시나리오의 `sigma_GAP=0.0903`, `sigma_KP=0.2067`, 모든 리스크 지표가 **완전히 동일**. 레짐 필터가 작동하지 않은 것으로 보임.
-3. ~~**GAP WMCR 미통과**~~ — **해소.** 지표 결함이었다. 예측구간 커버리지로 재측정하니 GAP의
-   `CovErr = 0.038`로 4개 컴포넌트 중 두 번째로 잘 보정돼 있다. WMCR이 낮게 나온 것은
-   밴드를 min/max 중점 기준으로 잡는 정의 탓이지 GAP 모델의 문제가 아니었다(2.3 참조).
-4. ~~**NAV·Combined 과대분산**~~ — **해소(오진이었음).** 근거였던 `mean_proximity ≈ -381.8`,
-   `sim_std` 26배는 삭제된 깨진 지표(`distribution_moments`, 대표경로 하나와 비교하는
-   `1-|a-b|/|a|` 형태)의 산물이었다. 기준분포로 재판정하면 NAV는 양측 p=0.500,
-   Combined는 백분위 35.0으로 모두 정상이다. 2.4의 정정 기록 참조.
-   **대신 GAP의 꼬리 두께가 논문 한계로 기록된다** — 주검증 3종은 통과하나 표적 통계량에서
-   실제 괴리율의 첨도가 모형보다 높다(2.4 참조). 모형 변경은 하지 않기로 결정.
-5. **`twad = inf`** — NAV/GAP/KP 전 모듈에서 무한대 (Combined만 0.003). 지표 정의상 분모 0 가능성.
-6. **KS 검정 전 모듈 기각** — `ks_pvalue ~ 1e-33` 수준. 대표경로(median) vs 실제 비교라 당연한 결과일 수 있으나 논문 서술 시 해석 필요.
+| etf (전체) | 0.036834 | 0.5847 |
+| kr (한국 요인) | 0.012585 | 0.1998 |
 
 ---
 
-## 5. 커밋 이력 요약
+## 6. 남은 과제
 
-| 커밋 | 날짜 | 내용 |
-|---|---|---|
-| `0c30cc2` ~ `b20f2e4` | 초기 | 초기 세팅, dataset, Poisson-GARCH NAV 시뮬레이터 |
-| `68cd240` ~ `159a75d` | 2026-01-29 | |
-| `a07b2f2` | 2026-02-12 | |
-| `11239a5`, `415bd8b` | 2026-04-22 | |
-| `9f2f1d3` | 2026-05-08 | |
-| `2a66fb1` | 2025-05-15 | |
-| `44ae59a` | 2026-05-31 | |
-| `8644688` ~ `bf63c9f` | 2026-06-19 | 4회 커밋 |
-| `7795358`, `0ac067d` | 2026-06-26 | |
-| `f14c00a` | 2026-06-26 | **시나리오별 모수 재추정 버전** |
-| `df14167` | 2026-06-26 | **모수 고정 버전** |
-| `8b55590` | 2026-07-14 | `results_main.py` 추가 (유의성 검정), `wmcr_test*.py` 삭제 |
-| `eb97732` | 2026-08-29 | Log Return 주말 손실 수정 (필터 -> 로그차분 순서) |
-| `8da0e0e` | 2026-08-29 | 타 PC 인수인계 체크리스트 (3.1) |
-| `75f50b0` | 2026-08-29 | WMCR 전면 제거 -> 예측구간 커버리지(PICP/NMPIW) 대체 |
-| `f2cac69` | 2026-08-29 | **Step 5/6을 3자 결합 검증으로 수정** (2자 -> `NAV x (1+GAP) x (1+KP)`) |
-| `b4fc30f` | 2026-08-29 | 보조지표 10종 삭제(주검증 3종 + 커버리지만 유지), 미사용 코드 1,511줄 삭제 |
-| `c182307` | 2026-08-29 | **커버리지 판정 기준을 모형 내재 기준분포로 교체**. NAV 과대분산 판정 철회, GAP 이상 발견 |
+우선순위 순이다. 상세는 [DECISIONS_AND_RESULTS.md](DECISIONS_AND_RESULTS.md) 13장 참조.
 
----
-
-## 6. 다음 세션 착수점 (2026-08-29 기준)
-
-5장까지의 미결 질문은 모두 해소됐다. 아래가 현재 상태와 다음 작업이다.
-
-### 6.1 확정된 결정
-
-| 항목 | 결정 | 상태 |
-|---|---|---|
-| 모형 선택 방식 | 선행연구 + 데이터 특성. **모형 선택 결론은 본 연구에서 다루지 않는다** | 완료 — `compare*/`, `btc_etf_valid/` 삭제 |
-| 검증 지표 | 주검증 PIT-KS / VaR-Kupiec / ES + 보조로 예측구간 커버리지 | 완료 |
-| 커버리지 판정 | 명목수준이 아니라 **모형 내재 기준분포 백분위**로 판정 | 완료 |
-| Step 5·6 | `NAV x (1+GAP) x (1+KP)` 3자 결합을 결합가격 로그수익률로 검정 | 완료 |
-| GAP 혁신항 | **Student-t** (ν=5.013). 실제 괴리율의 두꺼운 꼬리 반영 | 완료 (`3d5cf26`) |
-| 시나리오 모수 | Step 10 표기대로 **재추정** | 미실행 |
-| 데이터셋 이원화 | Phase 1 = `train`(343일), Phase 2 Step 8 = `train_ver1`(3년). 의도된 설계 | 논문에 명시 필요 |
-| **KP 레짐 수** | **3레짐 -> 2레짐으로 축소** | **미실행 — 다음 작업** |
-
-### 6.2 다음 작업 1 — KP를 2레짐으로 축소
-
-레짐2(`KP < -tau`)는 표본 기간 중 점유율이 **0%**다(실제 김치프리미엄 최저 -2.57%,
-`-tau` = -4.30%). 따라서 그 모수는 추정값이 아니라 `fit_ou_regime`의 폴백 기본값이다
-(`simulator/kp_threshold_ou_simulator.py:48-49`).
-
-문제는 그 기본값이 중립적이지 않다는 점이다:
-
-| | 레짐0 (\|KP\|<=tau) | 레짐1 (KP>tau) | 레짐2 (KP<-tau) |
-|---|---|---|---|
-| 시뮬 점유율 | 79.63% | 20.37% | **0.005%** |
-| kappa | 0.3230 | 0.3237 | **0.1000** (3배 느림) |
-| sigma0 | 0.01001 | 0.01269 | **0.02463** (2.5배 큼) |
-
-변동성 최대 + 회귀 최저 조합이라, 진입한 경로를 붙잡아두는 "함정" 레짐이 된다.
-현재 Base에서는 1000경로 중 7개가 중앙값 1일 머무는 수준이라 영향이 없으나,
-**Phase 2 위기 시나리오(S05: High RV + Extreme VKOSPI)는 KP 변동성을 키우므로
-진입 빈도가 올라간다** — 그때는 추정되지 않은 모수가 결과를 민다.
-
-축소해도 KP가 음수로 못 가는 것은 아니다. 별도 모수셋 대신 레짐0의 동학을 따를 뿐이다.
-`KP <= tau` / `KP > tau` 두 국면은 표준 SETAR 형태라 서술도 깔끔하다.
-
-> 작업: `get_regime()`을 2레짐으로, `fit_threshold_ou()`의 `regime_masks`를 2개로.
-> 축소 전후 Base 수치를 대조할 것(영향 받는 관측이 0.005%라 거의 불변이어야 정상).
-
-### 6.3 다음 작업 2 — Phase 2 전면 재실행
-
-현재 `results/scenario_simulator/` 이하는 **2026-06-19 ~ 07-21 생성분**이고,
-`dataset/raw/y_variables.csv`는 2026-08-29 11:35에 갱신됐다(`Log Return` 수정, `eb97732`).
-**즉 디스크의 Phase 2 결과는 전부 옛 데이터 기준이다.** 여기에 GAP의 Student-t 도입과
-KP 2레짐 축소까지 겹치므로 전면 재실행이 필요하다.
-
-추가로 2.8이 참조하는 `significance_test_preW/` 백업 디렉터리는 **실재하지 않으며**,
-문서의 유의성 표(VaR_95 0.15%, p95 0.07%)와 디스크 CSV(VaR_95 0.42~0.50%,
-p95 0.45~0.54%, 72개 비교 전부 유의)가 일치하지 않는다. 재실행 후 2.7·2.8을 갱신할 것.
-
-```bash
-echo all | python simulator/scenario_main.py    # Step 9-10, S01~S09
-echo all | python simulator/results_main.py     # Step 11, M=100 x N=1000 (약 25분)
-```
-
-### 6.4 남은 정리
-
-- `RESEARCH_SUMMARY`를 프레임워크 11단계(Phase 1 Step 1~7 / Phase 2 Step 8~11) 구조로 재편
-- `etf/` 가상환경과 `__pycache__` 추적 제외
-- 검정 3종 중복 구현 통합은 `compare*/` 삭제로 자동 해소됨
+1. **Step 10의 "모수 재추정" 표기 불일치** — 그림·주석·실제 동작을 하나로 맞춰야 한다
+2. **GAP `delta2` 처리** — 자유 추정 유지 + 한계 서술 / `delta2 = 0` 제약 중 택일
+3. **NAV 시차보정의 근본 해결** — 16:00 ET 기준 BTC 레퍼런스 레이트 수집
+4. `etf/` 가상환경과 `__pycache__` 추적 제외
+5. `results/compare_results/`, `results/gap_results/`는 코드가 삭제돼 재현 불가 — 인용 시 명시 필요
