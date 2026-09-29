@@ -1,0 +1,10 @@
+Scenario_ID,Bitcoin_RV,VKOSPI,KR_Volume,KR_SVI,Global_SVI,joint_frequency,pairwise_lift_mean,theoretical_class,combo_label
+S01,Low,Normal,Low,Low,Mid,67,1.1308,Possible,Low-Normal-Low-Low-Mid
+S02,Mid,Normal,High,High,High,45,1.095,Possible,Mid-Normal-High-High-High
+S03,Low,Normal,Low,Low,Low,23,1.1686,Possible,Low-Normal-Low-Low-Low
+S04,Mid,Normal,Low,Low,Low,22,1.1397,Possible,Mid-Normal-Low-Low-Low
+S05,High,Extreme,High,High,High,21,1.2601,Possible,High-Extreme-High-High-High
+S06,Mid,Normal,High,High,Mid,17,0.9415,Possible,Mid-Normal-High-High-Mid
+S07,Mid,Normal,Low,Low,Mid,11,1.0424,Possible,Mid-Normal-Low-Low-Mid
+S08,Mid,Normal,High,High,Low,0,,Possible,Mid-Normal-High-High-Low
+S09,High,Extreme,High,High,Mid,0,,Possible,High-Extreme-High-High-Mid

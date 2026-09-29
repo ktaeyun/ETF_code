@@ -22,7 +22,7 @@ simulator/scenario_main.py
   KP 모델:
     btc_volume_btc  → volume_btc
     VKOSPI_resid    → KOSPI_Volatility
-    bitcoin_kr      → 실제 데이터 유지 (HMM 외 변수)
+    bitcoin_kr      → 시나리오 레짐에서 생성 (domestic_btc_svi = KR_SVI)
 
 실행 예시
 ---------
@@ -52,11 +52,12 @@ from preprocessing.scenario_generator import (
     save_hmm_results_cache,
     scenarios_from_csv,
 )
-from simulator.data_loader import load_gap_exog, load_kp_exog
+from simulator.data_loader import (load_gap_exog, load_kp_exog,
+                                   load_nav_exog_and_returns, align_to_nav_grid)
 from simulator.gap_ou_simulator import GapOUSimulator
 from simulator.kp_threshold_ou_simulator import KPThresholdOUSimulator
 from simulator.visualizer import create_all_visualizations
-from compare.metrics import calculate_statistical_tests, calculate_all_metrics
+from simulator.metrics import calculate_statistical_tests
 
 # ── 경로 상수 ─────────────────────────────────────────────────
 SCENARIO_CSV   = _ROOT / "results" / "scenario_selection" / "final_scenarios_latest.csv"
@@ -76,6 +77,19 @@ _KP_EXOG_MAP = {
 # ══════════════════════════════════════════════════════════════
 # 유틸리티
 # ══════════════════════════════════════════════════════════════
+
+
+def _base_nav_source(meta_path) -> str:
+    """Phase 1이 어떤 NAV 계열로 돌았는지 sim_meta.json에서 읽는다.
+
+    nav_true 기반이면 NAV가 로그차분으로 첫 거래일을 잃으므로(343 -> 342),
+    GAP/KP도 같은 날을 버려야 결합 시 날짜 정렬이 유지된다.
+    """
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            return json.load(f).get("nav_source", "btc")
+    except (OSError, ValueError):
+        return "btc"
 
 def _to_serializable(obj):
     if obj is None:
@@ -137,12 +151,16 @@ def run_single_scenario(
             (out_dir / "plots" / sub).mkdir(parents=True, exist_ok=True)
 
     # ── 1. 실제 GAP / KP 시계열 로드 ──────────────────────────
-    df_gap_hist = load_gap_exog(base_dir=base_dir)
-    df_kp_hist  = load_kp_exog(base_dir=base_dir)
+    _nav_hist = load_nav_exog_and_returns(
+        base_dir=base_dir,
+        nav_source=_base_nav_source(_ROOT / "results" / "simulator" / "cache" / "sim_meta.json"),
+    )
+    df_gap_hist, df_kp_hist = align_to_nav_grid(
+        _nav_hist, load_gap_exog(base_dir=base_dir), load_kp_exog(base_dir=base_dir))
 
     gap_series    = df_gap_hist["etf_premium"]
     kp_series     = df_kp_hist["Kimchi Premium"]
-    bitcoin_kr    = df_kp_hist["bitcoin_kr"]   # HMM 외 변수 → 실제 데이터 유지
+    bitcoin_kr    = df_kp_hist["bitcoin_kr"]   # 정규화 기준(mean/std)용 실제 데이터
 
     T_gap = len(gap_series)
     T_kp  = len(kp_series)
@@ -170,6 +188,10 @@ def run_single_scenario(
     vix_sc = pd.Series(_align(df_gap_exog_sc["Global_RV"].values,      T_gap))
     vol_sc = pd.Series(_align(df_kp_exog_sc["btc_volume_btc"].values,  T_kp))
     kv_sc  = pd.Series(_align(df_kp_exog_sc["VKOSPI_resid"].values,    T_kp))
+    # domestic_btc_svi(= bitcoin_kr, KR_SVI)도 시나리오를 정의하는 5개 레짐 변수 중 하나다.
+    # 이전에는 "HMM 외 변수"로 잘못 분류돼 실제 데이터를 그대로 썼고, 그 결과
+    # KR_SVI가 High인 시나리오(S02, S05 등)가 시뮬레이션에서 차별화되지 않았다.
+    bkr_sc = pd.Series(_align(df_kp_exog_sc["domestic_btc_svi"].values, T_kp))
 
     # ── 3. Base 모수 로드 (고정) ───────────────────────────────
     _sim_meta_path = _ROOT / "results" / "simulator" / "cache" / "sim_meta.json"
@@ -202,15 +224,21 @@ def run_single_scenario(
         vix_mean=float(np.mean(_vix_raw)),
         vix_std=float(np.std(_vix_raw)),
         clip=3.0,
+        nu=gap_p.get("nu"),
     )
     _pr(f"\n  [GAP] Base 모수 고정  "
         f"κ={gap_sim.kappa:.6f}  μ={gap_sim.mu:.6f}  "
-        f"σ0={gap_sim.sigma0:.6f}  δ1={gap_sim.delta1:.6f}  δ2={gap_sim.delta2:.6f}")
+        f"σ0={gap_sim.sigma0:.6f}  δ1={gap_sim.delta1:.6f}  δ2={gap_sim.delta2:.6f}"
+        + (f"  ν={gap_sim.nu:.4f}" if gap_sim.nu is not None else "  (정규 혁신항)"))
 
     # ── 4. Base KP 모수 로드 (고정) ────────────────────────────
     _kp_rp = kp_p["regime_params"]
     kp_sim = KPThresholdOUSimulator({
         "threshold": kp_p["threshold"],
+        # 혁신항 분포도 Base 적합 결과를 그대로 따른다 (없으면 정규)
+        "nu": kp_p.get("nu"),
+        # 레짐 수는 Base 적합 결과를 그대로 따른다 (없으면 모수 개수로 추론)
+        "n_regimes": int(kp_p.get("n_regimes") or len(_kp_rp)),
         "regime_params": {
             int(r): {"kappa": v["kappa"], "mu": v["mu"], "sigma0": v["sigma0"]}
             for r, v in _kp_rp.items()
@@ -225,7 +253,8 @@ def run_single_scenario(
         "bitcoin_kr_mean":  float(np.mean(_bkr_raw)),
         "bitcoin_kr_std":   float(np.std(_bkr_raw)),
     }, clip=3.0)
-    _pr(f"  [KP]  Base 모수 고정  threshold={kp_sim.threshold:.6f}")
+    _pr(f"  [KP]  Base 모수 고정  threshold={kp_sim.threshold:.6f}"
+        + (f"  ν={kp_sim.nu:.4f}" if kp_sim.nu is not None else "  (정규 혁신항)"))
 
     # ── 5. GAP Monte Carlo ─────────────────────────────────────
     _pr(f"\n  [GAP] Monte Carlo (n={n_simulations}, T={T_gap})")
@@ -249,7 +278,7 @@ def run_single_scenario(
             T=T_kp, kp0=kp0,
             volume_btc_future=vol_sc.values,
             kospi_vol_future=kv_sc.values,
-            bitcoin_kr_future=bitcoin_kr.values,
+            bitcoin_kr_future=bkr_sc.values,
             seed=seed + 20000 + i,
         )).flatten()
         for i in range(n_simulations)
@@ -262,27 +291,28 @@ def run_single_scenario(
     rep_gap_ch    = np.diff(rep_gap)
 
     gap_stat  = calculate_statistical_tests(actual_gap_ch, mc_gap_ch)
-    gap_metr  = calculate_all_metrics(
-        actual_nav=actual_gap, simulated_nav=rep_gap,
-        actual_returns=actual_gap_ch, simulated_returns=rep_gap_ch,
-        monte_carlo_nav_paths=mc_gap, monte_carlo_returns_paths=mc_gap_ch,
-    )
+
     actual_kp_ch = np.diff(actual_kp)
     mc_kp_ch     = np.diff(mc_kp, axis=1)
     rep_kp_ch    = np.diff(rep_kp)
 
     kp_stat   = calculate_statistical_tests(actual_kp_ch, mc_kp_ch)
-    kp_metr   = calculate_all_metrics(
-        actual_nav=actual_kp, simulated_nav=rep_kp,
-        actual_returns=actual_kp_ch, simulated_returns=rep_kp_ch,
-        monte_carlo_nav_paths=mc_kp, monte_carlo_returns_paths=mc_kp_ch,
-    )
-    _pr(f"\n  [GAP 결과]  WMCR_price={gap_metr.get('wmcr_price', float('nan')):.4f}  "
-        f"DTW={gap_metr.get('dtw_price', float('nan')):.4f}  "
-        f"PIT-KS p={gap_stat['pit_ks']['ks_pvalue']:.4f}")
-    _pr(f"  [KP  결과]  WMCR_price={kp_metr.get('wmcr_price', float('nan')):.4f}  "
-        f"DTW={kp_metr.get('dtw_price', float('nan')):.4f}  "
-        f"PIT-KS p={kp_stat['pit_ks']['ks_pvalue']:.4f}")
+
+    def _test_row(st: dict) -> dict:
+        """세 검정의 p-value와 종합 판정. 시나리오 비교표의 검증 컬럼이 된다."""
+        es = st.get("es", {})
+        return {
+            "pit_ks_p": float(st["pit_ks"]["ks_pvalue"]),
+            "kupiec_p": float(st["kupiec"]["pvalue"]),
+            "es_p":     (float(es["pvalue"]) if es.get("pvalue") is not None else None),
+            "is_valid": bool(st["is_valid"]),
+        }
+
+    gap_tests, kp_tests = _test_row(gap_stat), _test_row(kp_stat)
+    for _tag, _tr in (("GAP", gap_tests), ("KP ", kp_tests)):
+        _es_p = f"{_tr['es_p']:.4f}" if _tr["es_p"] is not None else "  N/A"
+        _pr(f"  [{_tag} 결과]  PIT-KS p={_tr['pit_ks_p']:.4f}  "
+            f"Kupiec p={_tr['kupiec_p']:.4f}  ES p={_es_p}  VALID={_tr['is_valid']}")
 
     # ── 8. 저장 ────────────────────────────────────────────────
     # 파라미터 JSON
@@ -295,6 +325,7 @@ def run_single_scenario(
             "sigma0": gap_sim.sigma0,
             "delta1": gap_sim.delta1,
             "delta2": gap_sim.delta2,
+            "nu":     gap_sim.nu,
         },
         "kp_params": {
             "threshold": kp_sim.threshold,
@@ -307,19 +338,14 @@ def run_single_scenario(
                     "delta2": kp_sim.delta2_regime[r],
                     "delta3": kp_sim.delta3_regime[r],
                 }
-                for r in [0, 1, 2]
+                for r in range(kp_sim.n_regimes)
             },
+            "n_regimes": kp_sim.n_regimes,
+            "nu": kp_sim.nu,
         },
-        "gap_metrics": {
-            k: float(v) for k, v in gap_metr.items()
-            if isinstance(v, (int, float, np.floating))
-        },
-        "kp_metrics": {
-            k: float(v) for k, v in kp_metr.items()
-            if isinstance(v, (int, float, np.floating))
-        },
-        "gap_pit_ks_pvalue": float(gap_stat["pit_ks"]["ks_pvalue"]),
-        "kp_pit_ks_pvalue":  float(kp_stat["pit_ks"]["ks_pvalue"]),
+        # 검증은 프레임워크가 규정한 세 검정만 남긴다 (커버리지 지표는 metrics.py에서 제거)
+        "gap_tests": gap_tests,
+        "kp_tests":  kp_tests,
     }
     with open(out_dir / "params_and_metrics.json", "w", encoding="utf-8") as f:
         json.dump(_to_serializable(params_out), f, ensure_ascii=False, indent=2)
@@ -362,8 +388,6 @@ def run_single_scenario(
         "rep_kp":        rep_kp,
         "actual_gap":    actual_gap,
         "actual_kp":     actual_kp,
-        "gap_metrics":   gap_metr,
-        "kp_metrics":    kp_metr,
         "gap_stat":      gap_stat,
         "kp_stat":       kp_stat,
         "params_out":    params_out,
@@ -405,8 +429,18 @@ def compute_risk_metrics(mc_array: np.ndarray, actual: np.ndarray,
     # 종단 분포 (terminal distribution)
     terminal = mc_array[:, -1]
 
-    # 경로별 변화량 (수익률)
-    returns  = np.diff(mc_array, axis=1)          # (N, T-1)
+    # 경로별 로그수익률.
+    #
+    # 이전에는 절대 차분 np.diff(mc_array)를 썼는데, 그러면 지표가 변동성이 아니라
+    # 가격 수준에 끌려간다. 실측된 문제:
+    #   - 가격이 오를수록 절대 변동폭도 커져 기간 뒷부분이 계산을 지배한다
+    #     (4분기 기여 46.9% 대 1분기 9.9%. 로그수익률은 25%씩 균등)
+    #   - 경로별 변동성과 최종가격의 상관이 +0.919로, 사실상 가격 수준을 재게 된다
+    #     (로그수익률 기준 +0.172)
+    #   - 단위가 원이라 측정 기준(전체 ETF / 한국 요인)이 다르면 값을 비교할 수 없다
+    # 로그수익률은 무단위이고 수준에 불변이라 이 세 문제가 모두 사라진다.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        returns = np.diff(np.log(np.maximum(mc_array, 1e-12)), axis=1)   # (N, T-1)
 
     # ── 분포 지표 ──────────────────────────────────────────
     var_95   = float(np.percentile(terminal, alpha * 100))
@@ -420,9 +454,9 @@ def compute_risk_metrics(mc_array: np.ndarray, actual: np.ndarray,
     drawdowns = (mc_array - cummax) / (np.abs(cummax) + 1e-12)
     max_dd   = float(drawdowns.min(axis=1).mean())           # 평균 MDD
 
-    # 변동성 (경로별 변화량의 표준편차 평균)
+    # 변동성 (경로별 로그수익률 표준편차의 평균, 무단위)
     vol_paths = returns.std(axis=1)
-    vol_mean  = float(vol_paths.mean())
+    vol_mean  = float(np.nanmean(vol_paths))
 
     # 실제값과의 median 괴리
     median_path = np.median(mc_array, axis=0)
@@ -650,10 +684,20 @@ def _base_row(base: dict) -> dict:
     kp  = v.get("kp", {})
     ou  = gp.get("ou_params", {})
     kpp = kp.get("threshold_ou_params", {})
-    gm  = gp.get("validation_metrics", {})
-    km  = kp.get("validation_metrics", {})
     gs  = gp.get("statistical_tests", {})
     ks  = kp.get("statistical_tests", {})
+
+    # 커버리지 지표는 제거됐다. Base 도 시나리오와 같은 세 검정으로 비교한다.
+    def _tests_of(st: dict) -> dict:
+        es = st.get("es", {})
+        return {
+            "pit_ks_p": st.get("pit_ks", {}).get("ks_pvalue"),
+            "kupiec_p": st.get("kupiec", {}).get("pvalue"),
+            "es_p":     es.get("pvalue"),
+            "is_valid": st.get("is_valid"),
+        }
+
+    _gt, _kt = _tests_of(gs), _tests_of(ks)
 
     return {
         "Scenario_ID":   "Base",
@@ -662,18 +706,20 @@ def _base_row(base: dict) -> dict:
         "gap_sigma0":    ou.get("sigma0"),
         "gap_delta1_SI": ou.get("delta1"),
         "gap_delta2_VIX":ou.get("delta2"),
-        "gap_wmcr_price":gm.get("wmcr_price"),
-        "gap_dtw_price": gm.get("dtw_price"),
-        "gap_pmc":       gm.get("pmc"),
-        "gap_pit_ks_p":  gs.get("pit_ks", {}).get("ks_pvalue"),
+        "gap_nu":        ou.get("nu"),
+        "gap_pit_ks_p":  _gt["pit_ks_p"],
+        "gap_kupiec_p":  _gt["kupiec_p"],
+        "gap_es_p":      _gt["es_p"],
+        "gap_valid":     _gt["is_valid"],
         "kp_threshold":  kpp.get("threshold"),
-        "kp_kappa_r0":   kpp.get("regime_params", {}).get("0", {}).get("kappa"),
-        "kp_kappa_r1":   kpp.get("regime_params", {}).get("1", {}).get("kappa"),
-        "kp_kappa_r2":   kpp.get("regime_params", {}).get("2", {}).get("kappa"),
-        "kp_wmcr_price": km.get("wmcr_price"),
-        "kp_dtw_price":  km.get("dtw_price"),
-        "kp_pmc":        km.get("pmc"),
-        "kp_pit_ks_p":   ks.get("pit_ks", {}).get("ks_pvalue"),
+        "kp_nu":         kpp.get("nu"),
+        # 레짐 수는 사양에 따라 다르므로 존재하는 레짐만 담는다
+        **{f"kp_kappa_r{r}": v.get("kappa")
+           for r, v in sorted(kpp.get("regime_params", {}).items())},
+        "kp_pit_ks_p":   _kt["pit_ks_p"],
+        "kp_kupiec_p":   _kt["kupiec_p"],
+        "kp_es_p":       _kt["es_p"],
+        "kp_valid":      _kt["is_valid"],
     }
 
 
@@ -760,22 +806,23 @@ def build_comparison_table(all_results: dict) -> pd.DataFrame:
             "gap_sigma0":         p["gap_params"]["sigma0"],
             "gap_delta1_SI":      p["gap_params"]["delta1"],
             "gap_delta2_VIX":     p["gap_params"]["delta2"],
+            "gap_nu":             p["gap_params"].get("nu"),
             # GAP 검증
-            "gap_wmcr_price":     p["gap_metrics"].get("wmcr_price"),
-            "gap_dtw_price":      p["gap_metrics"].get("dtw_price"),
-            "gap_pmc":            p["gap_metrics"].get("pmc"),
-            "gap_pit_ks_p":       p["gap_pit_ks_pvalue"],
+            "gap_pit_ks_p":       p["gap_tests"]["pit_ks_p"],
+            "gap_kupiec_p":       p["gap_tests"]["kupiec_p"],
+            "gap_es_p":           p["gap_tests"]["es_p"],
+            "gap_valid":          p["gap_tests"]["is_valid"],
             # KP 임계값
             "kp_threshold":       p["kp_params"]["threshold"],
+            "kp_nu":              p["kp_params"].get("nu"),
             # KP 레짐별 kappa
-            "kp_kappa_r0":        p["kp_params"]["regime_params"]["0"]["kappa"],
-            "kp_kappa_r1":        p["kp_params"]["regime_params"]["1"]["kappa"],
-            "kp_kappa_r2":        p["kp_params"]["regime_params"]["2"]["kappa"],
+            **{f"kp_kappa_r{r}": v["kappa"]
+               for r, v in sorted(p["kp_params"]["regime_params"].items())},
             # KP 검증
-            "kp_wmcr_price":      p["kp_metrics"].get("wmcr_price"),
-            "kp_dtw_price":       p["kp_metrics"].get("dtw_price"),
-            "kp_pmc":             p["kp_metrics"].get("pmc"),
-            "kp_pit_ks_p":        p["kp_pit_ks_pvalue"],
+            "kp_pit_ks_p":        p["kp_tests"]["pit_ks_p"],
+            "kp_kupiec_p":        p["kp_tests"]["kupiec_p"],
+            "kp_es_p":            p["kp_tests"]["es_p"],
+            "kp_valid":           p["kp_tests"]["is_valid"],
         })
     df = pd.DataFrame(rows)
     numeric_cols = df.select_dtypes(include=[float, int]).columns
@@ -841,6 +888,7 @@ def _build_hmm_with_fixed_k(regime_cache_csv: Path) -> dict:
             index=vkospi_idx[22:22 + len(har_result.residuals_z)],
             name="VKOSPI_resid",
         )
+        # KP 모형의 VKOSPI 입력이 HAR 잔차이므로(data_loader.KP_VKOSPI_INPUT) 잔차 방출을 그대로 쓴다
         results["VKOSPI_resid"] = fit_scenario_hmm(resid, n_states=k_per_var["VKOSPI_resid"])
         print(f"    VKOSPI_resid: K={k_per_var['VKOSPI_resid']}  μ={results['VKOSPI_resid'].mu}")
 
@@ -1028,9 +1076,9 @@ def main():
     print(comparison_df[[
         "Scenario_ID",
         "gap_kappa", "gap_mu", "gap_sigma0",
-        "gap_wmcr_price", "gap_pit_ks_p",
+        "gap_pit_ks_p", "gap_kupiec_p", "gap_es_p", "gap_valid",
         "kp_threshold",
-        "kp_wmcr_price", "kp_pit_ks_p",
+        "kp_pit_ks_p", "kp_kupiec_p", "kp_es_p", "kp_valid",
     ]].to_string(index=False))
     print(f"\n  비교 요약 저장: {comparison_path}")
 

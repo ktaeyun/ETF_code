@@ -132,7 +132,8 @@ def _hmm_cache_key(n_init: int, B: int) -> str:
                     h.update(chunk)
         except FileNotFoundError:
             h.update(b"missing")
-    h.update(json.dumps({"n_init": n_init, "B": B}).encode())
+    # emission_v=2: 거래량 주 평균·VKOSPI 수준값 방출 (이전 캐시 무효화)
+    h.update(json.dumps({"n_init": n_init, "B": B, "emission_v": 3}).encode())
     return h.hexdigest()
 
 
@@ -238,6 +239,36 @@ def apply_inverse(y: np.ndarray, inverse: Optional[str]) -> np.ndarray:
     if inverse == "expm1":
         return np.expm1(y)
     return y.copy()
+
+
+def level_emission_from_states(
+    res:   "ScenarioHMMResult",
+    level: pd.Series,
+) -> "ScenarioHMMResult":
+    """레짐 라벨은 유지하고 방출분포만 '수준값' 단위로 바꾼 ScenarioHMMResult 를 만든다.
+
+    VKOSPI 는 HAR 표준화 잔차로 레짐을 분류하지만 KP 시뮬레이터는 VKOSPI 수준값을
+    (level - mean) / std 로 표준화한다. 잔차(±1 수준)를 그대로 넘기면 z ≈ -4 → clip(-3)에
+    걸려 Normal/Extreme 이 구별되지 않는다. 그래서 시나리오 생성용 방출은 잔차-레짐별
+    VKOSPI 수준값의 평균·표준편차로 둔다 (다른 축이 exp/expm1 역변환으로 수준값을
+    돌려주는 것과 같은 역할). 적합·Base 와 같은 이력에서 계산한다.
+    """
+    idx = res.series_index if res.series_index is not None else level.index[: len(res.states)]
+    lv  = level.reindex(idx).to_numpy(dtype=float)
+    ok  = ~np.isnan(lv)
+    mu  = np.array([np.nanmean(lv[ok & (res.states == k)]) for k in range(res.n_states)])
+    sd  = np.array([np.nanstd(lv[ok & (res.states == k)])  for k in range(res.n_states)])
+    return ScenarioHMMResult(
+        var_name      = res.var_name,
+        n_states      = res.n_states,
+        transform     = None,
+        inverse       = None,
+        mu            = mu,
+        sigma         = sd,
+        states        = res.states,
+        y_transformed = lv,
+        series_index  = idx,
+    )
 
 
 # ══════════════════════════════════════════════

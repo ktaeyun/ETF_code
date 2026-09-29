@@ -1,7 +1,7 @@
 """
 NAV 시뮬레이터 패키지
 ARIMAX-GARCH-t: Log Return을 종속변수, Hash Rate + Unique Addresses를 독립변수로 사용.
-검증: 통계적 검정(PIT-KS, VaR-Kupiec, ES) + Weighted Multi-band Capture Rate(WMCR) 등.
+검증: 통계적 검정(PIT-KS, VaR-Kupiec, ES) + 예측구간 커버리지(PICP/NMPIW) 등.
 """
 
 from simulator.data_loader import load_nav_exog_and_returns
@@ -27,7 +27,4 @@ __all__ = [
     "fit_kp_threshold_ou",
     "KPThresholdOUSimulator",
     "create_all_visualizations",
-    "compute_wmcr",
-    "wmcr_pvalue_calibration",
-    "wmcr_binomial_test",
 ]
