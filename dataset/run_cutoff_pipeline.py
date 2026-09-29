@@ -42,7 +42,7 @@ def log(master, msg):
 def run(master, root, name, args):
     t0 = time.time()
     log(master, f"{root.name} | {name} 시작")
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "MPLBACKEND": "Agg"}
     with (root / f"run_{name}.log").open("w", encoding="utf-8") as out:
         r = subprocess.run([PY, "-u", *args], cwd=root, stdout=out, stderr=subprocess.STDOUT, env=env)
     log(master, f"{root.name} | {name} 종료 exit={r.returncode} ({(time.time()-t0)/60:.1f}분)")

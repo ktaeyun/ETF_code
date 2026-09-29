@@ -170,6 +170,31 @@ def load_gap_exog(
     return merged
 
 
+# KP 모형의 VKOSPI 입력. "har_resid": HAR 표준화 잔차 (레짐 분류와 같은 변수, 결정 12).
+# "level": VKOSPI 수준값 (2026-09-22 이전 사양).
+KP_VKOSPI_INPUT = "har_resid"
+
+
+def load_vkospi_har_residual(base_dir: str) -> pd.Series:
+    """전체 이력(dataset/train_ver1, 2022~)에 HAR 모형을 적합해 표준화 잔차를 반환한다.
+
+    preprocessing.run_pipeline 의 Step 2 와 동일한 적합이므로 HMM 레짐 분류에 쓰인
+    잔차와 같은 계열이다. 인덱스는 거래일(DatetimeIndex).
+    """
+    import contextlib, io, sys
+    import matplotlib
+    matplotlib.use("Agg")  # HAR 플롯이 대화형 창을 띄우지 않도록
+    if base_dir not in sys.path:
+        sys.path.insert(0, base_dir)
+    from preprocessing.run_pipeline import load_data, step_har
+    with contextlib.redirect_stdout(io.StringIO()):
+        df_daily, _ = load_data()
+        har = step_har(df_daily, save=False)
+    idx = df_daily["VKOSPI"].dropna().index
+    return pd.Series(np.asarray(har.residuals_z, dtype=float),
+                     index=idx[22:22 + len(har.residuals_z)], name="VKOSPI_resid")
+
+
 def load_kp_exog(
     kp_path: str = None,
     y_path: str = None,
@@ -216,6 +241,16 @@ def load_kp_exog(
         how="inner",
     )
     merged = merged.sort_values("Date").reset_index(drop=True)
+
+    if KP_VKOSPI_INPUT == "har_resid":
+        # 열 이름은 하위 호환을 위해 유지하되 값은 HAR 표준화 잔차다.
+        resid = load_vkospi_har_residual(str(base_dir))
+        r = resid.reindex(pd.DatetimeIndex(merged["Date"]))
+        n_missing = int(r.isna().sum())
+        if n_missing:
+            r = r.ffill().bfill()
+            print(f"  [KP exog] VKOSPI HAR 잔차 결측 {n_missing}일 → 전후 값으로 채움")
+        merged["KOSPI_Volatility"] = r.to_numpy()
     return merged
 
 

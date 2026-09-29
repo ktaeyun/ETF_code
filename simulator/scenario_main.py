@@ -888,6 +888,7 @@ def _build_hmm_with_fixed_k(regime_cache_csv: Path) -> dict:
             index=vkospi_idx[22:22 + len(har_result.residuals_z)],
             name="VKOSPI_resid",
         )
+        # KP 모형의 VKOSPI 입력이 HAR 잔차이므로(data_loader.KP_VKOSPI_INPUT) 잔차 방출을 그대로 쓴다
         results["VKOSPI_resid"] = fit_scenario_hmm(resid, n_states=k_per_var["VKOSPI_resid"])
         print(f"    VKOSPI_resid: K={k_per_var['VKOSPI_resid']}  μ={results['VKOSPI_resid'].mu}")
 

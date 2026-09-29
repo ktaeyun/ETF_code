@@ -94,12 +94,15 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
         }
     ).dropna()
 
-    # SVI: 주 마지막 관측값, Volume: 주 합산
+    # SVI: 주 마지막 관측값, Volume: 주 평균(일별 단위 유지).
+    # 주 합산을 쓰면 시나리오 생성값이 KP 시뮬레이터의 일별 표준화(log volume 평균 8.4)와
+    # 어긋나 모든 시나리오의 z가 +1.6~+3(clip)으로 밀린다. 로그 공간에서 상수 이동이라
+    # HMM 레짐 라벨·K 선택은 합산과 동일하고 방출 평균만 일별 단위로 내려온다.
     df_weekly = pd.DataFrame(
         {
             "global_btc_svi":   df_daily["global_btc_svi"].resample("W-MON").last(),
             "domestic_btc_svi": df_daily["domestic_btc_svi"].resample("W-MON").last(),
-            "btc_volume_btc":   df_daily["btc_volume_btc"].resample("W-MON").sum(),
+            "btc_volume_btc":   df_daily["btc_volume_btc"].resample("W-MON").mean(),
         }
     ).dropna()
 

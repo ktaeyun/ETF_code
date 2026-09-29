@@ -77,6 +77,8 @@ def _sim_cache_key(base_dir: str, ar_order: tuple, S0: float, n_simulations: int
     h = hashlib.md5()
     for p in data_files:
         h.update(_file_md5(str(p)).encode())
+    from simulator.data_loader import KP_VKOSPI_INPUT
+    h.update(f"kp_vkospi_input={KP_VKOSPI_INPUT}".encode())
     h.update(json.dumps({
         "ar_order": list(ar_order), "S0": S0,
         "n_simulations": n_simulations, "seed": seed,
